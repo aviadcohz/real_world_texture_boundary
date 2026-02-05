@@ -1,0 +1,44 @@
+# Texture Curator - Multi-Agent System
+# Local-first, GPU-accelerated
+
+# ============================================
+# Core
+# ============================================
+python-dotenv>=1.0.0
+pydantic>=2.0.0
+dataclasses-json>=0.6.0
+
+# ============================================
+# LLM (Local via Ollama)
+# ============================================
+ollama>=0.3.0           # Python client for Ollama
+httpx>=0.25.0           # Async HTTP client
+
+# ============================================
+# Vision & Deep Learning
+# ============================================
+torch>=2.0.0
+torchvision>=0.15.0
+transformers>=4.40.0    # For DINOv2 and Qwen2.5-VL
+accelerate>=0.25.0      # For model loading
+Pillow>=10.0.0
+opencv-python>=4.8.0
+scikit-image>=0.22.0    # For GLCM, entropy
+
+# ============================================
+# Vector Database
+# ============================================
+faiss-gpu-cu12>=1.9.0   # GPU-accelerated FAISS for CUDA 12 (use faiss-cpu if no GPU)
+numpy>=1.24.0
+
+# ============================================
+# Utilities
+# ============================================
+tqdm>=4.65.0            # Progress bars
+rich>=13.0.0            # Beautiful terminal output
+loguru>=0.7.0           # Better logging
+
+# ============================================
+# Optional: MCP Protocol (for future)
+# ============================================
+# mcp>=0.1.0            # Uncomment when needed
