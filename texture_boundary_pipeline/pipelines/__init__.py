@@ -34,6 +34,7 @@ except ImportError:
 # Dual-GPU pipeline (local + remote server)
 try:
     from .dual_gpu_pipeline import DualGPUPipeline, run_dual_gpu_pipeline
+    from .iterative_dual_gpu_pipeline import IterativeDualGPUPipeline, run_iterative_dual_gpu_pipeline
     DUAL_GPU_AVAILABLE = True
 except ImportError:
     DUAL_GPU_AVAILABLE = False
@@ -57,6 +58,8 @@ __all__ = [
     # Dual-GPU pipeline
     'DualGPUPipeline',
     'run_dual_gpu_pipeline',
+    'IterativeDualGPUPipeline',
+    'run_iterative_dual_gpu_pipeline',
 
     # Availability flags
     'SCALABLE_AVAILABLE',

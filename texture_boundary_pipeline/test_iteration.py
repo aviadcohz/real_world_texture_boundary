@@ -1,39 +1,24 @@
-"""
-Test script for dual-GPU pipeline.
-
-Demonstrates:
-- Parallel processing on local GPU + remote H100
-- Automatic workload splitting
-- Batched inference on both GPUs
-"""
+"""Run iterative pipeline with entropy-based filtering."""
 from models import create_model
-from pipelines import run_dual_gpu_pipeline
+from pipelines import run_iterative_pipeline
 
-print("="*70)
-print("RUNNING DUAL-GPU PIPELINE")
-print("="*70)
 
-# Create local model
+# Create model (only Qwen - Sa2VA will be loaded after Qwen is unloaded)
 model = create_model('qwen-8b', device='cuda')
 
-# Remote H100 server URL
-REMOTE_URL = "http://132.66.150.69:8000"
+# Run iterative pipeline
+print("="*70)
+print("RUNNING ITERATIVE PIPELINE WITH ENTROPY FILTER")
+print("="*70)
 
-# Number of images to process (None = all images)
-num_images = None
-
-results = run_dual_gpu_pipeline(
-    local_model=model,
-    remote_url=REMOTE_URL,
+results = run_iterative_pipeline(
+    model=model,
     image_dir='/datasets/google_landmarks_v2/train_subset/images/',
-    output_dir="google_landmarks_v2",
-    local_ratio=0.3,          # 30% local, 70% on H100 (faster)
-    local_batch_size=4,       # Your local GPU
-    remote_batch_size=12,     # H100 can handle larger batches
-    num_images=num_images,
-    iou_threshold=0.6,
-    fix_boundaries=True,
+    output_dir="debug",
+    entropy_threshold=6,  # Minimum entropy for both texture regions
+    extract_masks=True,
+    num_images=1,
     verbose=True
 )
 
-print(f"\nResults saved to: {results['output_dir']}")
+print(f"📁 Results saved to: {results['output_dir']}")

@@ -584,54 +584,6 @@ class ScalablePipeline:
         # Step 6: Export
         export_dir = self.export_results()
         
-        # Generate visualizations
-        try:
-            from visualization import visualize_results
-            
-            # Create a minimal state-like object for visualization
-            class MinimalState:
-                def __init__(self, pipeline):
-                    self.num_candidates = len(pipeline.state.candidate_ids)
-                    self.num_scored = len(pipeline.state.candidate_ids)
-                    self.num_validated = int(np.sum(pipeline.state.is_valid))
-                    self.num_valid = int(np.sum(pipeline.state.is_valid))
-                    self.num_selected = len(pipeline.state.selected_ids)
-                    self.selected_ids = pipeline.state.selected_ids
-                    self.candidates = {}
-                    self.config = type('obj', (object,), {
-                        'output_path': pipeline.output_path,
-                        'target_n': pipeline.target_n,
-                    })()
-                    self.selection_report = type('obj', (object,), {
-                        'diversity_score': 0.0,
-                        'mean_quality_score': float(pipeline.state.quality_scores[pipeline.state.selected_indices].mean()),
-                    })()
-                    self.critic_report = None
-                    
-                    # Build candidates dict
-                    for cid in pipeline.state.selected_ids:
-                        idx = pipeline.state.candidate_ids.index(cid)
-                        img_path, mask_path = pipeline.state.candidate_paths[cid]
-                        
-                        self.candidates[cid] = type('obj', (object,), {
-                            'id': cid,
-                            'image_path': img_path,
-                            'mask_path': mask_path,
-                            'scores': type('obj', (object,), {
-                                'total_score': float(pipeline.state.quality_scores[idx]),
-                                'semantic_score': float(pipeline.state.semantic_scores[idx]),
-                                'texture_score': float(pipeline.state.texture_scores[idx]),
-                                'boundary_score': float(pipeline.state.boundary_scores[idx]),
-                            })(),
-                        })()
-            
-            min_state = MinimalState(self)
-            vis_dir = self.output_path / "visualizations"
-            visualize_results(min_state, vis_dir, show=False)
-            
-        except Exception as e:
-            logger.warning(f"Visualization failed: {e}")
-        
         total_time = time.time() - total_start
         
         print()
@@ -661,11 +613,11 @@ def main():
     
     parser.add_argument("--rwtd", type=str, default="/home/aviad/RWTD",
                        help="Path to RWTD reference dataset")
-    parser.add_argument("--source", type=str, default="/datasets/ade20k/real_texture_boundaries_20260204",
+    parser.add_argument("--source", type=str, default="google_landmarks_v2/run_20260205_172235",
                        help="Path to source pool")
     parser.add_argument("--output", type=str, default="./outputs_scaled",
                        help="Output directory")
-    parser.add_argument("--target-n", type=int, default=1000,
+    parser.add_argument("--target-n", type=int, default=24120,
                        help="Number of images to select")
     parser.add_argument("--device", type=str, default="cuda",
                        choices=["cuda", "cpu"], help="Device")

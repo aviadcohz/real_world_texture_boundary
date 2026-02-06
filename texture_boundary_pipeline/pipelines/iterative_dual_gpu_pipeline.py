@@ -1,0 +1,727 @@
+"""
+Iterative Dual-GPU Pipeline: Scaled grounding with entropy-based filtering.
+
+Workflow:
+1. Run dual-GPU pipeline for grounding (local GPU + remote H100)
+2. Unload Qwen model
+3. Load Sa2VA, extract masks, and filter by entropy
+"""
+
+from pathlib import Path
+from typing import List, Dict, Union
+import torch
+import json
+import shutil
+from PIL import Image
+import time
+
+from models import BaseVLM, QwenVLMClient
+from core import (
+    parse_texture_description,
+    extract_morphological_boundary,
+    compute_region_entropy,
+    process_bboxes,
+    visualize_all_images,
+    extract_all_crops,
+    update_processed_bboxes_with_crops,
+    validate_bboxes
+)
+from utils import (
+    list_images,
+    get_prompt,
+    save_json,
+    get_timestamp,
+    get_image_size
+)
+from utils.bbox_utils import parse_json_format
+
+
+class IterativeDualGPUPipeline:
+    """
+    Combines dual-GPU grounding with entropy-based filtering.
+    
+    Stages:
+    1. Dual-GPU grounding (local + remote in parallel)
+    2. Bbox processing (validation, IoU filter, boundary fix)
+    3. Visualization
+    4. Crop extraction
+    5. Mask extraction + entropy filtering
+    """
+
+    def __init__(
+        self,
+        local_model: BaseVLM,
+        remote_url: str,
+        output_dir: Union[str, Path] = "results",
+        local_ratio: float = 0.3,
+        local_batch_size: int = 4,
+        remote_batch_size: int = 12,
+        iou_threshold: float = 0.6,
+        fix_boundaries: bool = False,
+        extract_masks: bool = True,
+        entropy_threshold: float = 4.5,
+        boundary_thickness: int = 2,
+        verbose: bool = True
+    ):
+        """
+        Initialize iterative dual-GPU pipeline.
+
+        Args:
+            local_model: Local VLM model instance
+            remote_url: URL of remote VLM server
+            output_dir: Output directory
+            local_ratio: Fraction of images for local GPU (0.0-1.0)
+            local_batch_size: Batch size for local GPU
+            remote_batch_size: Batch size for remote GPU
+            iou_threshold: IoU threshold for bbox filtering
+            fix_boundaries: Enable boundary fixing
+            extract_masks: Whether to extract masks using Sa2VA
+            entropy_threshold: Minimum entropy for both textures
+            boundary_thickness: Thickness for boundary extraction
+            verbose: Print progress
+        """
+        self.local_model = local_model
+        self.remote_client = QwenVLMClient(
+            server_url=remote_url,
+            batch_size=remote_batch_size
+        )
+        self.output_dir = Path(output_dir)
+        self.local_ratio = local_ratio
+        self.local_batch_size = local_batch_size
+        self.remote_batch_size = remote_batch_size
+        self.iou_threshold = iou_threshold
+        self.fix_boundaries = fix_boundaries
+        self.extract_masks = extract_masks
+        self.entropy_threshold = entropy_threshold
+        self.sa2va_model = None
+        self.boundary_thickness = boundary_thickness
+        self.verbose = verbose
+
+        # Create output directory
+        self.timestamp = get_timestamp()
+        self.run_dir = self.output_dir / f"run_{self.timestamp}"
+        self.run_dir.mkdir(parents=True, exist_ok=True)
+
+    def run(
+        self,
+        image_paths: List[Union[str, Path]],
+        prompt: str = None
+    ) -> Dict:
+        """
+        Run the complete iterative dual-GPU pipeline.
+
+        Args:
+            image_paths: List of image paths
+            prompt: Grounding prompt
+
+        Returns:
+            Summary dict
+        """
+        if self.verbose:
+            print("\n" + "="*70)
+            print("ITERATIVE DUAL-GPU PIPELINE - STARTING")
+            print("="*70)
+            print(f"Total images: {len(image_paths)}")
+            print(f"Local GPU: {int(self.local_ratio * 100)}% of work")
+            print(f"Remote GPU: {int((1 - self.local_ratio) * 100)}% of work")
+            print(f"Output: {self.run_dir}")
+            print("="*70)
+
+        # Load prompt
+        if prompt is None:
+            prompt = get_prompt('grounding')
+
+        # STEP 1: Dual-GPU Grounding
+        if self.verbose:
+            print("\n" + "="*70)
+            print("STEP 1: DUAL-GPU GROUNDING")
+            print("="*70)
+
+        start_time = time.time()
+        grounding_results = self._run_dual_gpu_grounding(image_paths, prompt)
+        grounding_time = time.time() - start_time
+
+        if self.verbose:
+            print(f"\nGrounding completed in {grounding_time:.1f}s")
+
+        # Save grounding results
+        grounding_file = self.run_dir / "grounding_results.json"
+        save_json(
+            [{'image': r['image_name'], 'raw_response': r['raw_response']} 
+             for r in grounding_results],
+            grounding_file
+        )
+
+        # STEP 2: Process bboxes
+        if self.verbose:
+            print("\n" + "="*70)
+            print("STEP 2: PROCESSING BBOXES")
+            print("="*70)
+
+        processed_data, stats = self._process_all_bboxes(
+            grounding_results, image_paths
+        )
+        
+        processed_file = self.run_dir / "processed_bboxes.json"
+        save_json(processed_data, processed_file)
+
+        if self.verbose:
+            print(f"  📊 Processing Summary:")
+            print(f"     Input boxes:    {stats['total_input']}")
+            print(f"     Filtered (IoU): {stats['total_filtered']}")
+            print(f"     Fixed (edges):  {stats['total_fixed']}")
+            print(f"     Final boxes:    {stats['total_output']}")
+
+        # STEP 3: Visualize
+        if self.verbose:
+            print("\n" + "="*70)
+            print("STEP 3: VISUALIZING")
+            print("="*70)
+
+        viz_dir = self.run_dir / "visualizations"
+        viz_stats = visualize_all_images(
+            processed_data,
+            output_dir=viz_dir,
+            verbose=self.verbose
+        )
+
+        # STEP 4: Extract crops
+        if self.verbose:
+            print("\n" + "="*70)
+            print("STEP 4: EXTRACTING CROPS")
+            print("="*70)
+
+        crops_dir = self.run_dir / "crops"
+        crop_stats, crops_mapping = extract_all_crops(
+            processed_data,
+            output_dir=crops_dir,
+            resize_by_category=True,
+            parallel_save=True,
+            save_workers=8,
+            verbose=self.verbose
+        )
+
+        update_processed_bboxes_with_crops(
+            processed_bboxes_path=processed_file,
+            crops_mapping=crops_mapping
+        )
+
+        # Reload processed data with crop info
+        with open(processed_file, 'r') as f:
+            processed_data = json.load(f)
+
+        # STEP 5: Extract masks and filter by entropy (optional)
+        all_steps = []
+        
+        if self.extract_masks:
+            if self.verbose:
+                print("\n" + "="*70)
+                print("STEP 5: EXTRACT MASKS + ENTROPY FILTER (Sa2VA)")
+                print("="*70)
+
+            # Unload Qwen
+            self.unload_vlm_model()
+
+            # Load Sa2VA
+            self.load_sa2va_model()
+
+            if self.sa2va_model is not None:
+                masks_dir = self.run_dir / "masks"
+                filter_dir = self.run_dir / "filter"
+
+                mask_filter_stats = self._extract_masks_and_filter(
+                    crops_dir=crops_dir,
+                    processed_data=processed_data,
+                    masks_dir=masks_dir,
+                    filter_dir=filter_dir
+                )
+
+                all_steps.append({
+                    'step': 'mask_extraction_and_filter',
+                    **mask_filter_stats
+                })
+
+                if self.verbose:
+                    print(f"\n   ✅ Mask extraction + filtering complete")
+                    print(f"   Total: {mask_filter_stats['total']}")
+                    print(f"   Passed: {mask_filter_stats['passed']}")
+                    print(f"   Failed: {mask_filter_stats['failed']}")
+                    print(f"   Pass rate: {mask_filter_stats['pass_rate']}%")
+
+        # Final summary
+        total_time = time.time() - start_time
+        summary = {
+            'pipeline': 'iterative_dual_gpu',
+            'timestamp': self.timestamp,
+            'config': {
+                'local_ratio': self.local_ratio,
+                'local_batch_size': self.local_batch_size,
+                'remote_batch_size': self.remote_batch_size,
+                'remote_url': self.remote_client.server_url,
+                'iou_threshold': self.iou_threshold,
+                'fix_boundaries': self.fix_boundaries,
+                'entropy_threshold': self.entropy_threshold,
+                'extract_masks': self.extract_masks,
+            },
+            'input': {
+                'num_images': len(image_paths),
+            },
+            'timing': {
+                'grounding_time': grounding_time,
+                'total_time': total_time,
+                'images_per_second': len(image_paths) / total_time if total_time > 0 else 0
+            },
+            'processing': stats,
+            'visualization': viz_stats,
+            'crops': crop_stats,
+            'steps': all_steps,
+            'output_dir': str(self.run_dir)
+        }
+
+        summary_file = self.run_dir / "pipeline_summary.json"
+        save_json(summary, summary_file)
+
+        if self.verbose:
+            self._print_summary(summary)
+
+        return summary
+
+    def _run_dual_gpu_grounding(
+        self,
+        image_paths: List[Path],
+        prompt: str
+    ) -> List[Dict]:
+        """Run grounding on both local and remote GPUs in parallel."""
+        from concurrent.futures import ThreadPoolExecutor
+
+        # Split images
+        split_idx = int(len(image_paths) * self.local_ratio)
+        local_images = image_paths[:split_idx]
+        remote_images = image_paths[split_idx:]
+
+        if self.verbose:
+            print(f"\nLocal GPU:  {len(local_images)} images (batch_size={self.local_batch_size})")
+            print(f"Remote GPU: {len(remote_images)} images (batch_size={self.remote_batch_size})")
+
+        all_results = []
+
+        with ThreadPoolExecutor(max_workers=2) as executor:
+            local_future = executor.submit(
+                self._process_images_local, local_images, prompt
+            )
+            remote_future = executor.submit(
+                self._process_images_remote, remote_images, prompt
+            )
+
+            local_results = local_future.result()
+            remote_results = remote_future.result()
+
+        all_results = local_results + remote_results
+        return all_results
+
+    def _process_images_local(
+        self,
+        image_paths: List[Path],
+        prompt: str
+    ) -> List[Dict]:
+        """Process images on local GPU."""
+        if not image_paths:
+            return []
+
+        results = []
+
+        if self.verbose:
+            print(f"\n[LOCAL] Starting processing of {len(image_paths)} images...")
+
+        for i in range(0, len(image_paths), self.local_batch_size):
+            batch_paths = image_paths[i:i + self.local_batch_size]
+            batch_prompts = [prompt] * len(batch_paths)
+
+            if self.verbose:
+                batch_num = i // self.local_batch_size + 1
+                total_batches = (len(image_paths) + self.local_batch_size - 1) // self.local_batch_size
+                print(f"  [LOCAL] Batch {batch_num}/{total_batches}")
+
+            if hasattr(self.local_model, 'batch_generate'):
+                responses = self.local_model.batch_generate(batch_paths, batch_prompts)
+            else:
+                responses = [
+                    self.local_model.generate(p, prompt)
+                    for p in batch_paths
+                ]
+
+            for path, response in zip(batch_paths, responses):
+                path = Path(path)
+                bboxes = parse_json_format(response)
+                results.append({
+                    'image_name': path.name,
+                    'image_path': str(path),
+                    'raw_response': response,
+                    'bboxes': bboxes,
+                    'source': 'local'
+                })
+
+        if self.verbose:
+            print(f"  [LOCAL] Completed {len(results)} images")
+
+        return results
+
+    def _process_images_remote(
+        self,
+        image_paths: List[Path],
+        prompt: str
+    ) -> List[Dict]:
+        """Process images on remote GPU."""
+        if not image_paths:
+            return []
+
+        results = []
+
+        if self.verbose:
+            print(f"\n[REMOTE] Starting processing of {len(image_paths)} images...")
+
+        for i in range(0, len(image_paths), self.remote_batch_size):
+            batch_paths = image_paths[i:i + self.remote_batch_size]
+            batch_prompts = [prompt] * len(batch_paths)
+
+            if self.verbose:
+                batch_num = i // self.remote_batch_size + 1
+                total_batches = (len(image_paths) + self.remote_batch_size - 1) // self.remote_batch_size
+                print(f"  [REMOTE] Batch {batch_num}/{total_batches}")
+
+            responses = self.remote_client.batch_generate(batch_paths, batch_prompts)
+
+            for path, response in zip(batch_paths, responses):
+                path = Path(path)
+                bboxes = parse_json_format(response)
+                results.append({
+                    'image_name': path.name,
+                    'image_path': str(path),
+                    'raw_response': response,
+                    'bboxes': bboxes,
+                    'source': 'remote'
+                })
+
+        if self.verbose:
+            print(f"  [REMOTE] Completed {len(results)} images")
+
+        return results
+
+    def _process_all_bboxes(
+        self,
+        grounding_results: List[Dict],
+        image_paths: List[Path]
+    ) -> tuple:
+        """Process and validate all bboxes."""
+        processed_data = []
+        total_input = 0
+        total_filtered = 0
+        total_fixed = 0
+        total_output = 0
+
+        path_lookup = {Path(p).name: Path(p) for p in image_paths}
+
+        for result in grounding_results:
+            image_name = result['image_name']
+            image_path = path_lookup.get(image_name)
+
+            if image_path is None:
+                continue
+
+            img_width, img_height = get_image_size(image_path)
+
+            valid_boxes, _ = validate_bboxes(
+                result['bboxes'],
+                img_width,
+                img_height,
+                verbose=False
+            )
+
+            processed_boxes, stats = process_bboxes(
+                valid_boxes,
+                img_width,
+                img_height,
+                filter_iou=True,
+                iou_threshold=self.iou_threshold,
+                fix_boundaries=self.fix_boundaries,
+                verbose=False
+            )
+
+            processed_data.append({
+                'image': image_name,
+                'image_path': str(image_path),
+                'boxes': processed_boxes
+            })
+
+            total_input += stats['input_count']
+            total_filtered += stats['filtered_count']
+            total_fixed += stats['fixed_count']
+            total_output += stats['output_count']
+
+        stats = {
+            'total_input': total_input,
+            'total_filtered': total_filtered,
+            'total_fixed': total_fixed,
+            'total_output': total_output,
+        }
+
+        return processed_data, stats
+
+    def unload_vlm_model(self):
+        """Unload Qwen model from GPU to free VRAM."""
+        if self.verbose:
+            print("\n   🔄 Unloading VLM model from GPU...")
+
+        try:
+            del self.local_model._model
+            del self.local_model._processor
+            self.local_model._model = None
+            self.local_model._processor = None
+
+            import gc
+            gc.collect()
+            torch.cuda.empty_cache()
+
+            if self.verbose:
+                print("   ✅ VLM model deleted, CUDA cache cleared")
+        except Exception as e:
+            if self.verbose:
+                print(f"   ⚠️  Could not unload model: {e}")
+
+    def load_sa2va_model(self):
+        """Load Sa2VA model after Qwen is unloaded."""
+        if self.verbose:
+            print("\n   🔄 Loading Sa2VA model...")
+
+        try:
+            from models import Sa2VAModel
+            self.sa2va_model = Sa2VAModel(device='cuda')
+            if self.verbose:
+                print("   ✅ Sa2VA model loaded successfully")
+        except Exception as e:
+            if self.verbose:
+                print(f"   ⚠️  Could not load Sa2VA model: {e}")
+            self.sa2va_model = None
+
+    def _extract_masks_and_filter(
+        self,
+        crops_dir: Path,
+        processed_data: List[Dict],
+        masks_dir: Path,
+        filter_dir: Path
+    ) -> Dict:
+        """Extract masks for all crops and filter by entropy."""
+        if self.sa2va_model is None:
+            if self.verbose:
+                print("   ⚠️  No Sa2VA model provided, skipping")
+            return {'total': 0, 'passed': 0, 'failed': 0}
+
+        # Build lookup: crop_name -> description
+        description_lookup = {}
+        for img_data in processed_data:
+            for box in img_data.get('boxes', []):
+                if 'crop_name' in box and 'description' in box:
+                    description_lookup[box['crop_name']] = box['description']
+
+        # Get all crops
+        all_crops = []
+        for category in ['tiny', 'small', 'medium', 'large', 'xlarge']:
+            category_dir = crops_dir / category
+            if category_dir.exists():
+                crops = list(category_dir.glob("*.jpg")) + list(category_dir.glob("*.png"))
+                all_crops.extend(crops)
+
+        if self.verbose:
+            print(f"\n   📦 Found {len(all_crops)} crops to process")
+            print(f"   🎯 Entropy threshold: {self.entropy_threshold}")
+
+        filter_results = []
+        passed_crops = []
+        failed_crops = []
+
+        for idx, crop_path in enumerate(all_crops, 1):
+            crop_name = crop_path.name
+            category = crop_path.parent.name
+
+            description = description_lookup.get(crop_name)
+            if not description:
+                if self.verbose:
+                    print(f"      [{idx}/{len(all_crops)}] {crop_name} - ⚠️  No description, skipping")
+                continue
+
+            if self.verbose:
+                print(f"      [{idx}/{len(all_crops)}] {crop_name}...", end=" ")
+
+            try:
+                from core import parse_texture_description, compute_region_entropy, extract_morphological_boundary
+                
+                # Parse description
+                texture_a, texture_b = parse_texture_description(description)
+
+                # Load crop image
+                crop_image = Image.open(crop_path).convert('RGB')
+
+                # Segment both textures
+                mask_a = self.sa2va_model.segment_texture(crop_path, texture_a)
+                mask_b = self.sa2va_model.segment_texture(crop_path, texture_b)
+
+                # Compute entropy for each region
+                entropy_a = compute_region_entropy(crop_image, mask_a)
+                entropy_b = compute_region_entropy(crop_image, mask_b)
+                min_entropy = min(entropy_a, entropy_b)
+
+                # Check if both pass threshold
+                passed = bool((entropy_a >= self.entropy_threshold) and (entropy_b >= self.entropy_threshold))
+
+                # Extract boundary mask
+                boundary = extract_morphological_boundary(
+                    mask_a, mask_b,
+                    thickness=self.boundary_thickness
+                )
+
+                # Create result entry
+                result = {
+                    'crop_name': crop_name,
+                    'crop_path': str(crop_path),
+                    'category': category,
+                    'description': description,
+                    'texture_a': texture_a,
+                    'texture_b': texture_b,
+                    'entropy_a': round(entropy_a, 3),
+                    'entropy_b': round(entropy_b, 3),
+                    'min_entropy': round(min_entropy, 3),
+                    'threshold': self.entropy_threshold,
+                    'passed': passed
+                }
+                filter_results.append(result)
+
+                # Save mask
+                mask_category_dir = masks_dir / category
+                mask_category_dir.mkdir(parents=True, exist_ok=True)
+                mask_filename = crop_name.replace('.jpg', '.png').replace('.jpeg', '.png')
+                mask_path = mask_category_dir / mask_filename
+                Image.fromarray(boundary).save(mask_path)
+
+                result['mask_path'] = str(mask_path)
+
+                if passed:
+                    passed_crops.append(result)
+                    # Copy crop to filter/passed folder
+                    filter_passed_dir = filter_dir / "passed" / category
+                    filter_passed_dir.mkdir(parents=True, exist_ok=True)
+                    shutil.copy2(crop_path, filter_passed_dir / crop_name)
+
+                    if self.verbose:
+                        print(f"✓ PASS (H_a={entropy_a:.2f}, H_b={entropy_b:.2f})")
+                else:
+                    failed_crops.append(result)
+                    # Copy crop to filter/failed folder
+                    filter_failed_dir = filter_dir / "failed" / category
+                    filter_failed_dir.mkdir(parents=True, exist_ok=True)
+                    shutil.copy2(crop_path, filter_failed_dir / crop_name)
+
+                    if self.verbose:
+                        print(f"✗ FAIL (H_a={entropy_a:.2f}, H_b={entropy_b:.2f})")
+
+            except Exception as e:
+                if self.verbose:
+                    print(f"✗ Error: {e}")
+                filter_results.append({
+                    'crop_name': crop_name,
+                    'crop_path': str(crop_path),
+                    'error': str(e),
+                    'passed': False
+                })
+                failed_crops.append({'crop_name': crop_name, 'error': str(e)})
+
+        # Save filter results JSON
+        filter_json_path = filter_dir / "entropy_filter_results.json"
+        save_json(filter_results, filter_json_path)
+
+        summary = {
+            'total': len(all_crops),
+            'processed': len(filter_results),
+            'passed': len(passed_crops),
+            'failed': len(failed_crops),
+            'threshold': self.entropy_threshold,
+            'pass_rate': round(len(passed_crops) / len(filter_results) * 100, 1) if filter_results else 0,
+            'masks_dir': str(masks_dir),
+            'filter_dir': str(filter_dir),
+            'filter_json': str(filter_json_path)
+        }
+
+        return summary
+
+    def _print_summary(self, summary: Dict):
+        """Print final summary."""
+        print("\n" + "="*70)
+        print("ITERATIVE DUAL-GPU PIPELINE COMPLETE!")
+        print("="*70)
+        print(f"  Output directory: {self.run_dir}")
+        print(f"  Total images: {summary['input']['num_images']}")
+        print(f"  Grounding time: {summary['timing']['grounding_time']:.1f}s")
+        print(f"  Total time: {summary['timing']['total_time']:.1f}s")
+        print(f"  Throughput: {summary['timing']['images_per_second']:.2f} images/sec")
+        print(f"  Total crops: {summary['crops'].get('total_crops', 0)}")
+        if self.extract_masks and summary['steps']:
+            filter_step = summary['steps'][0]
+            print(f"  Masks passed entropy filter: {filter_step.get('passed', 0)}")
+        print("="*70 + "\n")
+
+
+def run_iterative_dual_gpu_pipeline(
+    local_model: BaseVLM,
+    remote_url: str,
+    image_dir: Union[str, Path],
+    output_dir: Union[str, Path] = "results",
+    local_ratio: float = 0.3,
+    local_batch_size: int = 4,
+    remote_batch_size: int = 12,
+    num_images: int = None,
+    extract_masks: bool = True,
+    entropy_threshold: float = 4.5,
+    boundary_thickness: int = 2,
+    **kwargs
+) -> Dict:
+    """
+    Run iterative dual-GPU pipeline on a directory of images.
+
+    Args:
+        local_model: Local VLM model instance
+        remote_url: URL of remote VLM server
+        image_dir: Directory containing images
+        output_dir: Output directory
+        local_ratio: Fraction for local GPU (0.3 = 30% local, 70% remote)
+        local_batch_size: Batch size for local GPU
+        remote_batch_size: Batch size for remote GPU
+        num_images: Number of images to process (None = all)
+        extract_masks: Whether to extract masks using Sa2VA
+        entropy_threshold: Minimum entropy for both textures
+        boundary_thickness: Thickness for boundary extraction
+        **kwargs: Additional pipeline arguments
+
+    Returns:
+        Summary dict
+    """
+    images = list_images(image_dir)
+
+    if not images:
+        raise ValueError(f"No images found in {image_dir}")
+
+    if num_images is not None:
+        images = images[:num_images]
+
+    pipeline = IterativeDualGPUPipeline(
+        local_model=local_model,
+        remote_url=remote_url,
+        output_dir=output_dir,
+        local_ratio=local_ratio,
+        local_batch_size=local_batch_size,
+        remote_batch_size=remote_batch_size,
+        extract_masks=extract_masks,
+        entropy_threshold=entropy_threshold,
+        boundary_thickness=boundary_thickness,
+        **kwargs
+    )
+
+    return pipeline.run(images)

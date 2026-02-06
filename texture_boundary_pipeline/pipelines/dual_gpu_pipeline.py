@@ -60,6 +60,9 @@ class DualGPUPipeline:
         remote_url: str,
         output_dir: Union[str, Path] = "results",
         config: 'ScaleConfig' = None,
+        sa2va_model = None,
+        extract_boundaries: bool = True,
+        boundary_thickness: int = 2,
         local_ratio: float = 0.3,
         local_batch_size: int = 4,
         remote_batch_size: int = 12,
@@ -90,6 +93,9 @@ class DualGPUPipeline:
         )
         self.output_dir = Path(output_dir)
         self.config = config
+        self.sa2va_model = sa2va_model
+        self.extract_boundaries = extract_boundaries
+        self.boundary_thickness = boundary_thickness
         self.local_ratio = local_ratio
         self.local_batch_size = local_batch_size
         self.remote_batch_size = remote_batch_size
@@ -202,6 +208,9 @@ class DualGPUPipeline:
         crop_stats, crops_mapping = extract_all_crops(
             processed_data,
             output_dir=crops_dir,
+            sa2va_model=self.sa2va_model,
+            extract_boundaries=self.extract_boundaries,
+            boundary_thickness=self.boundary_thickness,
             resize_by_category=True,
             parallel_save=True,
             save_workers=8,
@@ -423,6 +432,9 @@ def run_dual_gpu_pipeline(
     image_dir: Union[str, Path],
     output_dir: Union[str, Path] = "results",
     config: 'ScaleConfig' = None,
+    sa2va_model = None,
+    extract_boundaries: bool = True,
+    boundary_thickness: int = 2,
     local_ratio: float = 0.3,
     local_batch_size: int = 4,
     remote_batch_size: int = 12,
@@ -460,6 +472,9 @@ def run_dual_gpu_pipeline(
         remote_url=remote_url,
         output_dir=output_dir,
         config=config,
+        sa2va_model=sa2va_model,
+        extract_boundaries=extract_boundaries,
+        boundary_thickness=boundary_thickness,
         local_ratio=local_ratio,
         local_batch_size=local_batch_size,
         remote_batch_size=remote_batch_size,
