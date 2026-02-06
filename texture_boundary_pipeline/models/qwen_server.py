@@ -163,8 +163,8 @@ def load_model(model_size: str = "8B", device: str = "cuda", batch_size: int = 1
     from .qwen_vlm import QwenVLM
 
     model_names = {
-        "8B": "Qwen/Qwen2.5-VL-7B-Instruct",
-        "2B": "Qwen/Qwen2.5-VL-2B-Instruct"
+        "8B": "Qwen/Qwen3-VL-8B-Instruct",
+        "2B": "Qwen/Qwen3-VL-2B-Instruct"
     }
 
     model_name = model_names.get(model_size, model_size)
