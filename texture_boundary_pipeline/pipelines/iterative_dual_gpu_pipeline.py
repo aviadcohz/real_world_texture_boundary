@@ -20,6 +20,7 @@ from core import (
     parse_texture_description,
     extract_morphological_boundary,
     compute_region_entropy,
+    refine_masks_and_extract_boundary,
     process_bboxes,
     visualize_all_images,
     extract_all_crops,
@@ -63,6 +64,11 @@ class IterativeDualGPUPipeline:
         entropy_threshold: float = 4.5,
         boundary_thickness: int = 2,
         target_size: int = 1024,
+        # Mask refinement parameters
+        refine_masks: bool = True,
+        refinement_min_object_size: int = 100,
+        refinement_closing_kernel_size: int = 7,
+        refinement_gaussian_sigma: float = 3.0,
         verbose: bool = True
     ):
         """
@@ -81,6 +87,10 @@ class IterativeDualGPUPipeline:
             entropy_threshold: Minimum entropy for both textures
             boundary_thickness: Thickness for boundary extraction
             target_size: Target size for image padding (default 1024)
+            refine_masks: Whether to apply mask refinement before boundary extraction
+            refinement_min_object_size: Min object size for refinement (default 100)
+            refinement_closing_kernel_size: Kernel size for morphological closing (default 7)
+            refinement_gaussian_sigma: Sigma for Gaussian blur smoothing (default 3.0)
             verbose: Print progress
         """
         self.local_model = local_model
@@ -100,6 +110,12 @@ class IterativeDualGPUPipeline:
         self.boundary_thickness = boundary_thickness
         self.target_size = target_size
         self.verbose = verbose
+        
+        # Mask refinement settings
+        self.refine_masks = refine_masks
+        self.refinement_min_object_size = refinement_min_object_size
+        self.refinement_closing_kernel_size = refinement_closing_kernel_size
+        self.refinement_gaussian_sigma = refinement_gaussian_sigma
 
         # Create output directory
         self.timestamp = get_timestamp()
@@ -601,7 +617,7 @@ class IterativeDualGPUPipeline:
                 print(f"      [{idx}/{len(all_crops)}] {crop_name}...", end=" ")
 
             try:
-                from core import parse_texture_description, compute_region_entropy, extract_morphological_boundary
+                from core import parse_texture_description, compute_region_entropy, extract_morphological_boundary, refine_masks_and_extract_boundary
                 
                 # Parse description
                 texture_a, texture_b = parse_texture_description(description)
@@ -621,11 +637,27 @@ class IterativeDualGPUPipeline:
                 # Check if both pass threshold
                 passed = bool((entropy_a >= self.entropy_threshold) and (entropy_b >= self.entropy_threshold))
 
-                # Extract boundary mask
-                boundary = extract_morphological_boundary(
-                    mask_a, mask_b,
-                    thickness=self.boundary_thickness
-                )
+                # Extract boundary mask - with optional mask refinement
+                if self.refine_masks:
+                    # Refine both masks and extract XOR boundary
+                    refined_a, refined_b, boundary = refine_masks_and_extract_boundary(
+                        mask_a, mask_b,
+                        min_object_size=self.refinement_min_object_size,
+                        closing_kernel_size=self.refinement_closing_kernel_size,
+                        gaussian_sigma=self.refinement_gaussian_sigma
+                    )
+                    # Use refined masks for saving
+                    mask_a_to_save = refined_a
+                    mask_b_to_save = refined_b
+                else:
+                    # Fallback to original morphological boundary extraction
+                    boundary = extract_morphological_boundary(
+                        mask_a, mask_b,
+                        thickness=self.boundary_thickness
+                    )
+                    # Use original masks for saving
+                    mask_a_to_save = mask_a
+                    mask_b_to_save = mask_b
 
                 # Create result entry
                 result = {
@@ -639,7 +671,9 @@ class IterativeDualGPUPipeline:
                     'entropy_b': round(entropy_b, 3),
                     'min_entropy': round(min_entropy, 3),
                     'threshold': self.entropy_threshold,
-                    'passed': passed
+                    'passed': passed,
+                    'mask_refined': self.refine_masks,
+                    'boundary_method': 'xor_refined' if self.refine_masks else 'morphological'
                 }
                 filter_results.append(result)
 
@@ -730,6 +764,11 @@ def run_iterative_dual_gpu_pipeline(
     entropy_threshold: float = 4.5,
     boundary_thickness: int = 2,
     target_size: int = 1024,
+    # Mask refinement parameters
+    refine_masks: bool = True,
+    refinement_min_object_size: int = 100,
+    refinement_closing_kernel_size: int = 7,
+    refinement_gaussian_sigma: float = 3.0,
     **kwargs
 ) -> Dict:
     """
@@ -748,6 +787,10 @@ def run_iterative_dual_gpu_pipeline(
         entropy_threshold: Minimum entropy for both textures
         boundary_thickness: Thickness for boundary extraction
         target_size: Target size for image padding (default 1024)
+        refine_masks: Whether to apply mask refinement before boundary extraction
+        refinement_min_object_size: Min object size for refinement (default 100)
+        refinement_closing_kernel_size: Kernel size for morphological closing (default 7)
+        refinement_gaussian_sigma: Sigma for Gaussian blur smoothing (default 3.0)
         **kwargs: Additional pipeline arguments
 
     Returns:
@@ -772,6 +815,10 @@ def run_iterative_dual_gpu_pipeline(
         entropy_threshold=entropy_threshold,
         boundary_thickness=boundary_thickness,
         target_size=target_size,
+        refine_masks=refine_masks,
+        refinement_min_object_size=refinement_min_object_size,
+        refinement_closing_kernel_size=refinement_closing_kernel_size,
+        refinement_gaussian_sigma=refinement_gaussian_sigma,
         **kwargs
     )
 

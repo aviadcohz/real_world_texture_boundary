@@ -58,6 +58,12 @@ from .entropy_filter import (
     batch_filter_by_entropy
 )
 
+# Mask refinement
+from .mask_refinement import (
+    MaskRefinementPipeline,
+    refine_masks_and_extract_boundary
+)
+
 __all__ = [
     # Grounding
     'ground_single_image',
@@ -104,4 +110,8 @@ __all__ = [
     'compute_region_entropy',
     'filter_by_entropy',
     'batch_filter_by_entropy',
+
+    # Mask refinement
+    'MaskRefinementPipeline',
+    'refine_masks_and_extract_boundary',
 ]

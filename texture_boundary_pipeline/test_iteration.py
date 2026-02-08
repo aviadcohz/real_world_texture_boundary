@@ -17,7 +17,7 @@ results = run_iterative_pipeline(
     output_dir="no_scale",
     entropy_threshold=3.5,  # Minimum entropy for both texture regions
     extract_masks=True,
-    num_images=20,
+    num_images=5,
     verbose=True
 )
 

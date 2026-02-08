@@ -9,8 +9,8 @@
 source ~/miniconda3/etc/profile.d/conda.sh
 conda activate texture_boundary
 
-export PYTHONPATH="/home/researcher/real_world_texture_boundary/texture_boundary_pipeline:$PYTHONPATH"
-cd /home/researcher/real_world_texture_boundary/texture_boundary_pipeline
+export PYTHONPATH="/home/aviad/real_world_texture_boundary/texture_boundary_pipeline:$PYTHONPATH"
+cd /home/aviad/real_world_texture_boundary/texture_boundary_pipeline
 
 echo "Starting QwenVL 2.5 server on 0.0.0.0:8000..."
 python -m models.qwen_server --host 0.0.0.0 --port 8000 --batch-size 12

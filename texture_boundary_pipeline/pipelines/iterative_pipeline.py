@@ -11,6 +11,7 @@ from core import (
     parse_texture_description,
     extract_morphological_boundary,
     compute_region_entropy,
+    refine_masks_and_extract_boundary,
 )
 from utils import (
     list_images,
@@ -39,6 +40,11 @@ class IterativePipeline:
         boundary_thickness: int = 2,
         collect_dataset: bool = True,
         dataset_base_dir: Union[str, Path] = "/datasets/ade20k",
+        # Mask refinement parameters
+        refine_masks: bool = True,
+        refinement_min_object_size: int = 100,
+        refinement_closing_kernel_size: int = 7,
+        refinement_gaussian_sigma: float = 3.0,
         **basic_pipeline_kwargs
     ):
         """
@@ -52,6 +58,10 @@ class IterativePipeline:
             boundary_thickness: Thickness for boundary extraction
             collect_dataset: Whether to collect passed crops into a dataset
             dataset_base_dir: Base directory for dataset collection
+            refine_masks: Whether to apply mask refinement before boundary extraction
+            refinement_min_object_size: Min object size for refinement (default 100)
+            refinement_closing_kernel_size: Kernel size for morphological closing (default 7)
+            refinement_gaussian_sigma: Sigma for Gaussian blur smoothing (default 3.0)
             **basic_pipeline_kwargs: Arguments for BasicPipeline
         """
         self.model = model
@@ -62,6 +72,12 @@ class IterativePipeline:
         self.boundary_thickness = boundary_thickness
         self.collect_dataset = collect_dataset
         self.dataset_base_dir = Path(dataset_base_dir)
+        
+        # Mask refinement settings
+        self.refine_masks = refine_masks
+        self.refinement_min_object_size = refinement_min_object_size
+        self.refinement_closing_kernel_size = refinement_closing_kernel_size
+        self.refinement_gaussian_sigma = refinement_gaussian_sigma
 
         # Create basic pipeline - WITHOUT mask extraction
         self.basic_pipeline = BasicPipeline(
@@ -190,11 +206,27 @@ class IterativePipeline:
                 # Check if both pass threshold
                 passed = bool((entropy_a >= self.entropy_threshold) and (entropy_b >= self.entropy_threshold))
 
-                # Extract boundary mask
-                boundary = extract_morphological_boundary(
-                    mask_a, mask_b,
-                    thickness=self.boundary_thickness
-                )
+                # Extract boundary mask - with optional mask refinement
+                if self.refine_masks:
+                    # Refine both masks and extract XOR boundary
+                    refined_a, refined_b, boundary = refine_masks_and_extract_boundary(
+                        mask_a, mask_b,
+                        min_object_size=self.refinement_min_object_size,
+                        closing_kernel_size=self.refinement_closing_kernel_size,
+                        gaussian_sigma=self.refinement_gaussian_sigma
+                    )
+                    # Use refined masks for saving
+                    mask_a_to_save = refined_a
+                    mask_b_to_save = refined_b
+                else:
+                    # Fallback to original morphological boundary extraction
+                    boundary = extract_morphological_boundary(
+                        mask_a, mask_b,
+                        thickness=self.boundary_thickness
+                    )
+                    # Use original masks for saving
+                    mask_a_to_save = mask_a
+                    mask_b_to_save = mask_b
 
                 # Create result entry
                 result = {
@@ -208,7 +240,9 @@ class IterativePipeline:
                     'entropy_b': round(entropy_b, 3),
                     'min_entropy': round(min_entropy, 3),
                     'threshold': self.entropy_threshold,
-                    'passed': passed
+                    'passed': passed,
+                    'mask_refined': self.refine_masks,
+                    'boundary_method': 'xor_refined' if self.refine_masks else 'morphological'
                 }
                 filter_results.append(result)
 
@@ -264,7 +298,14 @@ class IterativePipeline:
             'pass_rate': round(len(passed_crops) / len(filter_results) * 100, 1) if filter_results else 0,
             'masks_dir': str(masks_dir),
             'filter_dir': str(filter_dir),
-            'filter_json': str(filter_json_path)
+            'filter_json': str(filter_json_path),
+            'mask_refined': self.refine_masks,
+            'boundary_method': 'xor_refined' if self.refine_masks else 'morphological',
+            'refinement_params': {
+                'min_object_size': self.refinement_min_object_size,
+                'closing_kernel_size': self.refinement_closing_kernel_size,
+                'gaussian_sigma': self.refinement_gaussian_sigma
+            } if self.refine_masks else None
         }
 
         return summary
@@ -518,6 +559,11 @@ def run_iterative_pipeline(
     collect_dataset: bool = True,
     dataset_base_dir: Union[str, Path] = "/datasets/ade20k",
     num_images: int = None,
+    # Mask refinement parameters
+    refine_masks: bool = True,
+    refinement_min_object_size: int = 100,
+    refinement_closing_kernel_size: int = 7,
+    refinement_gaussian_sigma: float = 3.0,
     **kwargs
 ) -> Dict:
     """
@@ -532,6 +578,10 @@ def run_iterative_pipeline(
         collect_dataset: Whether to collect passed crops into a dataset
         dataset_base_dir: Base directory for dataset (default: /datasets)
         num_images: Number of images to process (None = all)
+        refine_masks: Whether to apply mask refinement before boundary extraction
+        refinement_min_object_size: Min object size for refinement (default 100)
+        refinement_closing_kernel_size: Kernel size for morphological closing (default 7)
+        refinement_gaussian_sigma: Sigma for Gaussian blur smoothing (default 3.0)
         **kwargs: Additional pipeline arguments
 
     Returns:
@@ -552,6 +602,10 @@ def run_iterative_pipeline(
         entropy_threshold=entropy_threshold,
         collect_dataset=collect_dataset,
         dataset_base_dir=dataset_base_dir,
+        refine_masks=refine_masks,
+        refinement_min_object_size=refinement_min_object_size,
+        refinement_closing_kernel_size=refinement_closing_kernel_size,
+        refinement_gaussian_sigma=refinement_gaussian_sigma,
         **kwargs
     )
     return pipeline.run(images)
