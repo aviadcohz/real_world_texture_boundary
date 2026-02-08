@@ -33,7 +33,8 @@ from utils import (
     get_timestamp,
     get_image_size
 )
-from utils.bbox_utils import parse_json_format
+from utils.bbox_utils import parse_json_format, adjust_bboxes_after_padding
+from utils.image_utils import pad_image_to_standard_size
 
 
 class IterativeDualGPUPipeline:
@@ -61,6 +62,7 @@ class IterativeDualGPUPipeline:
         extract_masks: bool = True,
         entropy_threshold: float = 4.5,
         boundary_thickness: int = 2,
+        target_size: int = 1024,
         verbose: bool = True
     ):
         """
@@ -78,6 +80,7 @@ class IterativeDualGPUPipeline:
             extract_masks: Whether to extract masks using Sa2VA
             entropy_threshold: Minimum entropy for both textures
             boundary_thickness: Thickness for boundary extraction
+            target_size: Target size for image padding (default 1024)
             verbose: Print progress
         """
         self.local_model = local_model
@@ -95,6 +98,7 @@ class IterativeDualGPUPipeline:
         self.entropy_threshold = entropy_threshold
         self.sa2va_model = None
         self.boundary_thickness = boundary_thickness
+        self.target_size = target_size
         self.verbose = verbose
 
         # Create output directory
@@ -262,6 +266,7 @@ class IterativeDualGPUPipeline:
                 'fix_boundaries': self.fix_boundaries,
                 'entropy_threshold': self.entropy_threshold,
                 'extract_masks': self.extract_masks,
+                'target_size': self.target_size,
             },
             'input': {
                 'num_images': len(image_paths),
@@ -324,7 +329,7 @@ class IterativeDualGPUPipeline:
         image_paths: List[Path],
         prompt: str
     ) -> List[Dict]:
-        """Process images on local GPU."""
+        """Process images on local GPU with proper padding."""
         if not image_paths:
             return []
 
@@ -335,24 +340,46 @@ class IterativeDualGPUPipeline:
 
         for i in range(0, len(image_paths), self.local_batch_size):
             batch_paths = image_paths[i:i + self.local_batch_size]
-            batch_prompts = [prompt] * len(batch_paths)
 
             if self.verbose:
                 batch_num = i // self.local_batch_size + 1
                 total_batches = (len(image_paths) + self.local_batch_size - 1) // self.local_batch_size
                 print(f"  [LOCAL] Batch {batch_num}/{total_batches}")
 
+            # Pad images and collect metadata
+            padded_images = []
+            padding_metadata = []
+            for path in batch_paths:
+                padded_image, offset_x, offset_y, orig_size = pad_image_to_standard_size(
+                    path, target_size=self.target_size
+                )
+                padded_images.append(padded_image)
+                padding_metadata.append({
+                    'offset_x': offset_x,
+                    'offset_y': offset_y,
+                    'original_size': orig_size
+                })
+
+            batch_prompts = [prompt] * len(padded_images)
+
             if hasattr(self.local_model, 'batch_generate'):
-                responses = self.local_model.batch_generate(batch_paths, batch_prompts)
+                responses = self.local_model.batch_generate(padded_images, batch_prompts)
             else:
                 responses = [
-                    self.local_model.generate(p, prompt)
-                    for p in batch_paths
+                    self.local_model.generate(img, prompt)
+                    for img in padded_images
                 ]
 
-            for path, response in zip(batch_paths, responses):
+            for path, response, metadata in zip(batch_paths, responses, padding_metadata):
                 path = Path(path)
-                bboxes = parse_json_format(response)
+                # Parse bboxes from padded image coordinates
+                bboxes_padded = parse_json_format(response)
+                # Adjust bboxes back to original image coordinates
+                bboxes = adjust_bboxes_after_padding(
+                    bboxes_padded,
+                    metadata['offset_x'],
+                    metadata['offset_y']
+                )
                 results.append({
                     'image_name': path.name,
                     'image_path': str(path),
@@ -371,7 +398,7 @@ class IterativeDualGPUPipeline:
         image_paths: List[Path],
         prompt: str
     ) -> List[Dict]:
-        """Process images on remote GPU."""
+        """Process images on remote GPU with proper padding."""
         if not image_paths:
             return []
 
@@ -382,18 +409,39 @@ class IterativeDualGPUPipeline:
 
         for i in range(0, len(image_paths), self.remote_batch_size):
             batch_paths = image_paths[i:i + self.remote_batch_size]
-            batch_prompts = [prompt] * len(batch_paths)
 
             if self.verbose:
                 batch_num = i // self.remote_batch_size + 1
                 total_batches = (len(image_paths) + self.remote_batch_size - 1) // self.remote_batch_size
                 print(f"  [REMOTE] Batch {batch_num}/{total_batches}")
 
-            responses = self.remote_client.batch_generate(batch_paths, batch_prompts)
+            # Pad images and collect metadata
+            padded_images = []
+            padding_metadata = []
+            for path in batch_paths:
+                padded_image, offset_x, offset_y, orig_size = pad_image_to_standard_size(
+                    path, target_size=self.target_size
+                )
+                padded_images.append(padded_image)
+                padding_metadata.append({
+                    'offset_x': offset_x,
+                    'offset_y': offset_y,
+                    'original_size': orig_size
+                })
 
-            for path, response in zip(batch_paths, responses):
+            batch_prompts = [prompt] * len(padded_images)
+            responses = self.remote_client.batch_generate(padded_images, batch_prompts)
+
+            for path, response, metadata in zip(batch_paths, responses, padding_metadata):
                 path = Path(path)
-                bboxes = parse_json_format(response)
+                # Parse bboxes from padded image coordinates
+                bboxes_padded = parse_json_format(response)
+                # Adjust bboxes back to original image coordinates
+                bboxes = adjust_bboxes_after_padding(
+                    bboxes_padded,
+                    metadata['offset_x'],
+                    metadata['offset_y']
+                )
                 results.append({
                     'image_name': path.name,
                     'image_path': str(path),
@@ -681,6 +729,7 @@ def run_iterative_dual_gpu_pipeline(
     extract_masks: bool = True,
     entropy_threshold: float = 4.5,
     boundary_thickness: int = 2,
+    target_size: int = 1024,
     **kwargs
 ) -> Dict:
     """
@@ -698,6 +747,7 @@ def run_iterative_dual_gpu_pipeline(
         extract_masks: Whether to extract masks using Sa2VA
         entropy_threshold: Minimum entropy for both textures
         boundary_thickness: Thickness for boundary extraction
+        target_size: Target size for image padding (default 1024)
         **kwargs: Additional pipeline arguments
 
     Returns:
@@ -721,6 +771,7 @@ def run_iterative_dual_gpu_pipeline(
         extract_masks=extract_masks,
         entropy_threshold=entropy_threshold,
         boundary_thickness=boundary_thickness,
+        target_size=target_size,
         **kwargs
     )
 

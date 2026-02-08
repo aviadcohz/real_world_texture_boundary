@@ -14,10 +14,10 @@ print("="*70)
 results = run_iterative_pipeline(
     model=model,
     image_dir='/datasets/google_landmarks_v2/train_subset/images/',
-    output_dir="debug",
-    entropy_threshold=6,  # Minimum entropy for both texture regions
+    output_dir="no_scale",
+    entropy_threshold=3.5,  # Minimum entropy for both texture regions
     extract_masks=True,
-    num_images=1,
+    num_images=20,
     verbose=True
 )
 

@@ -34,7 +34,7 @@ results = run_iterative_dual_gpu_pipeline(
     remote_batch_size=12,         # H100 can handle larger batches
     num_images=num_images,
     extract_masks=True,
-    entropy_threshold=6,
+    entropy_threshold=3.5,
     verbose=True
 )
 
