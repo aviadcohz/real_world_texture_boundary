@@ -6,7 +6,7 @@
 # The server will be accessible from other machines at:
 #   http://<this-machine-ip>:8000
 
-source ~/miniconda3/etc/profile.d/conda.sh
+source /home/aviad/miniconda3/etc/profile.d/conda.sh
 conda activate texture_boundary
 
 export PYTHONPATH="/home/aviad/real_world_texture_boundary/texture_boundary_pipeline:$PYTHONPATH"
