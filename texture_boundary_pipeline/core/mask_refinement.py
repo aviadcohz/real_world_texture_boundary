@@ -190,7 +190,9 @@ class MaskRefinementPipeline:
     def refine_mask_pair_and_xor(
         self, 
         mask_a: np.ndarray, 
-        mask_b: np.ndarray
+        mask_b: np.ndarray,
+        extract_thin_boundary: bool = True,
+        boundary_method: str = 'morphological_gradient'
     ) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
         """
         Refine a pair of masks and compute XOR boundary.
@@ -198,19 +200,66 @@ class MaskRefinementPipeline:
         Args:
             mask_a: First binary mask
             mask_b: Second binary mask
+            extract_thin_boundary: Whether to extract thin boundary from XOR region
+            boundary_method: Method for thin boundary extraction:
+                - 'morphological_gradient': dilation - erosion (default)
+                - 'skeleton': skeletonize the XOR region
+                - 'none': return raw XOR region
             
         Returns:
-            Tuple of (refined_mask_a, refined_mask_b, xor_boundary)
+            Tuple of (refined_mask_a, refined_mask_b, boundary)
             All as uint8 arrays (0s and 255s)
         """
         # Refine each mask individually
         refined_a = self.refine_single_mask(mask_a)
         refined_b = self.refine_single_mask(mask_b)
         
-        # Compute XOR boundary between refined masks
-        xor_boundary = cv2.bitwise_xor(refined_a, refined_b)
+        # Compute XOR boundary region between refined masks
+        xor_region = cv2.bitwise_xor(refined_a, refined_b)
         
-        return refined_a, refined_b, xor_boundary
+        if not extract_thin_boundary or boundary_method == 'none':
+            return refined_a, refined_b, xor_region
+        
+        # Extract thin boundary from XOR region
+        boundary = self._extract_thin_boundary(xor_region, method=boundary_method)
+        
+        return refined_a, refined_b, boundary
+    
+    def _extract_thin_boundary(
+        self, 
+        region_mask: np.ndarray, 
+        method: str = 'morphological_gradient'
+    ) -> np.ndarray:
+        """
+        Extract thin boundary line from a region mask.
+        
+        Args:
+            region_mask: Binary region mask (0s and 255s)
+            method: Extraction method:
+                - 'morphological_gradient': dilation - erosion
+                - 'skeleton': skeletonize
+        
+        Returns:
+            Thin boundary mask (0s and 255s)
+        """
+        if method == 'morphological_gradient':
+            # Morphological gradient: dilation - erosion
+            kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3))
+            dilated = cv2.dilate(region_mask, kernel, iterations=1)
+            eroded = cv2.erode(region_mask, kernel, iterations=1)
+            gradient = cv2.subtract(dilated, eroded)
+            return gradient
+        
+        elif method == 'skeleton':
+            # Skeletonize the region to get thin centerline
+            from skimage.morphology import skeletonize
+            binary = region_mask > 127
+            skeleton = skeletonize(binary)
+            return (skeleton * 255).astype(np.uint8)
+        
+        else:
+            # Return as-is
+            return region_mask
 
 
 def refine_masks_and_extract_boundary(
@@ -218,10 +267,12 @@ def refine_masks_and_extract_boundary(
     mask_b: np.ndarray,
     min_object_size: int = 100,
     closing_kernel_size: int = 7,
-    gaussian_sigma: float = 3.0
+    gaussian_sigma: float = 3.0,
+    extract_thin_boundary: bool = True,
+    boundary_method: str = 'morphological_gradient'
 ) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
     """
-    Convenience function to refine mask pair and extract XOR boundary.
+    Convenience function to refine mask pair and extract boundary.
     
     Args:
         mask_a: First texture mask (H×W uint8)
@@ -229,9 +280,14 @@ def refine_masks_and_extract_boundary(
         min_object_size: Minimum object size to keep
         closing_kernel_size: Kernel size for morphological closing
         gaussian_sigma: Sigma for Gaussian blur smoothing
+        extract_thin_boundary: Whether to extract thin boundary from XOR region
+        boundary_method: Method for thin boundary extraction:
+            - 'morphological_gradient': dilation - erosion (default)
+            - 'skeleton': skeletonize the XOR region
+            - 'none': return raw XOR region
     
     Returns:
-        Tuple of (refined_mask_a, refined_mask_b, xor_boundary)
+        Tuple of (refined_mask_a, refined_mask_b, boundary)
         All as uint8 arrays (0s and 255s)
     """
     pipeline = MaskRefinementPipeline(
@@ -240,4 +296,8 @@ def refine_masks_and_extract_boundary(
         gaussian_sigma=gaussian_sigma
     )
     
-    return pipeline.refine_mask_pair_and_xor(mask_a, mask_b)
+    return pipeline.refine_mask_pair_and_xor(
+        mask_a, mask_b,
+        extract_thin_boundary=extract_thin_boundary,
+        boundary_method=boundary_method
+    )
