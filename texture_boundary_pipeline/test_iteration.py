@@ -15,10 +15,10 @@ results = run_iterative_pipeline(
     model=model,
     image_dir='/datasets/google_landmarks_v2/train_subset/images/',
     output_dir="morphological_boundary_results",
-    dataset_base_dir='/datasets/google_landmarks_v2/',
+    dataset_base_dir='/datasets/debug/',
     entropy_threshold=3.5,  # Minimum entropy for both texture regions
     extract_masks=True,
-    num_images=5,
+    num_images=1,
     verbose=True
 )
 

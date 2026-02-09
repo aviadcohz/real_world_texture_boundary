@@ -246,14 +246,33 @@ class IterativePipeline:
                 }
                 filter_results.append(result)
 
-                # Save mask
+                # Save masks: boundary in masks/, textures in masks_textures/
+                mask_filename = crop_name.replace('.jpg', '.png').replace('.jpeg', '.png')
+
+                # Save boundary mask in masks/category/
                 mask_category_dir = masks_dir / category
                 mask_category_dir.mkdir(parents=True, exist_ok=True)
-                mask_filename = crop_name.replace('.jpg', '.png').replace('.jpeg', '.png')
                 mask_path = mask_category_dir / mask_filename
                 Image.fromarray(boundary).save(mask_path)
 
+                # Save texture masks in masks_textures/category/
+                masks_textures_dir = masks_dir.parent / "masks_textures"
+                mask_textures_category_dir = masks_textures_dir / category
+                mask_textures_category_dir.mkdir(parents=True, exist_ok=True)
+
+                # Save texture A mask with _mask_a suffix
+                mask_a_filename = mask_filename.replace('.png', '_mask_a.png')
+                mask_a_path = mask_textures_category_dir / mask_a_filename
+                Image.fromarray(mask_a_to_save).save(mask_a_path)
+
+                # Save texture B mask with _mask_b suffix
+                mask_b_filename = mask_filename.replace('.png', '_mask_b.png')
+                mask_b_path = mask_textures_category_dir / mask_b_filename
+                Image.fromarray(mask_b_to_save).save(mask_b_path)
+
                 result['mask_path'] = str(mask_path)
+                result['mask_a_path'] = str(mask_a_path)
+                result['mask_b_path'] = str(mask_b_path)
 
                 if passed:
                     passed_crops.append(result)
@@ -297,6 +316,7 @@ class IterativePipeline:
             'threshold': self.entropy_threshold,
             'pass_rate': round(len(passed_crops) / len(filter_results) * 100, 1) if filter_results else 0,
             'masks_dir': str(masks_dir),
+            'masks_textures_dir': str(masks_dir.parent / "masks_textures"),
             'filter_dir': str(filter_dir),
             'filter_json': str(filter_json_path),
             'mask_refined': self.refine_masks,
@@ -319,8 +339,9 @@ class IterativePipeline:
         Collect all passed crops and masks into a flat dataset structure.
 
         Creates:
-            /datasets/real_texture_boundaries_<date>/images/  - all passed crops
-            /datasets/real_texture_boundaries_<date>/masks/   - matching masks
+            /datasets/real_texture_boundaries_<date>/images/         - all passed crops
+            /datasets/real_texture_boundaries_<date>/masks/          - boundary masks
+            /datasets/real_texture_boundaries_<date>/masks_textures/ - texture A & B masks (with suffixes)
 
         Args:
             filter_dir: Directory containing filter results (with passed/ subfolder)
@@ -337,8 +358,10 @@ class IterativePipeline:
         # Create output directories
         images_dir = dataset_dir / "images"
         masks_out_dir = dataset_dir / "masks"
+        masks_textures_dir = dataset_dir / "masks_textures"
         images_dir.mkdir(parents=True, exist_ok=True)
         masks_out_dir.mkdir(parents=True, exist_ok=True)
+        masks_textures_dir.mkdir(parents=True, exist_ok=True)
 
         if self.verbose:
             print(f"\n   📁 Dataset directory: {dataset_dir}")
@@ -347,7 +370,11 @@ class IterativePipeline:
         passed_dir = filter_dir / "passed"
         collected_images = 0
         collected_masks = 0
+        collected_masks_a = 0
+        collected_masks_b = 0
         skipped_masks = 0
+        skipped_masks_a = 0
+        skipped_masks_b = 0
 
         for category in ['tiny', 'small', 'medium', 'large', 'xlarge']:
             category_dir = passed_dir / category
@@ -364,10 +391,11 @@ class IterativePipeline:
                 shutil.copy2(crop_path, dest_image)
                 collected_images += 1
 
-                # Find and copy matching mask
+                # Find and copy matching masks (boundary + texture A + B)
                 mask_name = crop_name.replace('.jpg', '.png').replace('.jpeg', '.png')
-                mask_path = masks_dir / category / mask_name
 
+                # Copy boundary mask from masks/category/
+                mask_path = masks_dir / category / mask_name
                 if mask_path.exists():
                     dest_mask = masks_out_dir / mask_name
                     shutil.copy2(mask_path, dest_mask)
@@ -375,7 +403,34 @@ class IterativePipeline:
                 else:
                     skipped_masks += 1
                     if self.verbose:
-                        print(f"   ⚠️  Mask not found for: {crop_name}")
+                        print(f"   ⚠️  Boundary mask not found for: {crop_name}")
+
+                # Copy texture masks from masks_textures/category/
+                masks_textures_source_dir = masks_dir.parent / "masks_textures"
+
+                # Copy texture A mask with suffix
+                mask_a_name = mask_name.replace('.png', '_mask_a.png')
+                mask_a_path = masks_textures_source_dir / category / mask_a_name
+                if mask_a_path.exists():
+                    dest_mask_a = masks_textures_dir / mask_a_name
+                    shutil.copy2(mask_a_path, dest_mask_a)
+                    collected_masks_a += 1
+                else:
+                    skipped_masks_a += 1
+                    if self.verbose:
+                        print(f"   ⚠️  Texture A mask not found for: {crop_name}")
+
+                # Copy texture B mask with suffix
+                mask_b_name = mask_name.replace('.png', '_mask_b.png')
+                mask_b_path = masks_textures_source_dir / category / mask_b_name
+                if mask_b_path.exists():
+                    dest_mask_b = masks_textures_dir / mask_b_name
+                    shutil.copy2(mask_b_path, dest_mask_b)
+                    collected_masks_b += 1
+                else:
+                    skipped_masks_b += 1
+                    if self.verbose:
+                        print(f"   ⚠️  Texture B mask not found for: {crop_name}")
 
         # Save dataset info
         info = {
@@ -385,7 +440,11 @@ class IterativePipeline:
             'source_masks_dir': str(masks_dir),
             'total_images': collected_images,
             'total_masks': collected_masks,
+            'total_masks_a': collected_masks_a,
+            'total_masks_b': collected_masks_b,
             'skipped_masks': skipped_masks,
+            'skipped_masks_a': skipped_masks_a,
+            'skipped_masks_b': skipped_masks_b,
             'entropy_threshold': self.entropy_threshold
         }
         info_path = dataset_dir / "dataset_info.json"
@@ -396,9 +455,14 @@ class IterativePipeline:
             'dataset_dir': str(dataset_dir),
             'images_dir': str(images_dir),
             'masks_dir': str(masks_out_dir),
+            'masks_textures_dir': str(masks_textures_dir),
             'collected_images': collected_images,
             'collected_masks': collected_masks,
-            'skipped_masks': skipped_masks
+            'collected_masks_a': collected_masks_a,
+            'collected_masks_b': collected_masks_b,
+            'skipped_masks': skipped_masks,
+            'skipped_masks_a': skipped_masks_a,
+            'skipped_masks_b': skipped_masks_b
         }
 
         return summary
@@ -508,7 +572,9 @@ class IterativePipeline:
                     if self.verbose:
                         print(f"\n   ✅ Dataset collection complete")
                         print(f"   Images collected: {dataset_stats['collected_images']}")
-                        print(f"   Masks collected: {dataset_stats['collected_masks']}")
+                        print(f"   Boundary masks collected: {dataset_stats['collected_masks']}")
+                        print(f"   Texture A masks collected: {dataset_stats['collected_masks_a']}")
+                        print(f"   Texture B masks collected: {dataset_stats['collected_masks_b']}")
                         print(f"   Dataset: {dataset_stats['dataset_dir']}")
 
         # Final summary
@@ -540,6 +606,7 @@ class IterativePipeline:
             print(f"\n  Output folders:")
             print(f"    crops/          - All extracted crops")
             print(f"    masks/          - Boundary masks")
+            print(f"    masks_textures/ - Texture A & B masks (with _mask_a, _mask_b suffix)")
             print(f"    filter/         - Entropy filter results")
             print(f"    visualizations/ - Bbox visualizations")
             if 'dataset_dir' in summary:
