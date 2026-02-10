@@ -122,7 +122,7 @@ class CriticAgent(BaseAgent):
     def __init__(
         self,
         llm_client: OllamaClient,
-        vlm_model: str = "qwen2.5-vl:7b",  # or "llava:7b"
+        vlm_model: str = "qwen2.5vl:7b",  # or "llava:7b"
         device: str = "cuda",
     ):
         """

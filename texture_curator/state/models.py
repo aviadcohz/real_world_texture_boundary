@@ -232,6 +232,32 @@ class CriticVerdict:
 
 
 # ============================================
+# Mask Filter Verdict
+# ============================================
+
+@dataclass
+class MaskFilterVerdict:
+    """
+    Result of VLM-based mask quality assessment.
+
+    Produced by the MaskFilter agent before scoring.
+    """
+
+    passed: bool = False
+    reason: str = ""          # NO_BOUNDARY, NOT_GROUND_TRUTH, INCOMPLETE, TOO_COMPLEX, NO_TEXTURE_TRANSITION, PASS
+    confidence: float = 0.0   # 0-1
+    explanation: str = ""     # VLM's brief reasoning
+
+    def to_dict(self) -> dict:
+        return {
+            "passed": self.passed,
+            "reason": self.reason,
+            "confidence": float(self.confidence),
+            "explanation": self.explanation,
+        }
+
+
+# ============================================
 # Candidate Record (Full record for one candidate)
 # ============================================
 
@@ -256,7 +282,10 @@ class CandidateRecord:
     
     # Mask status
     mask_status: MaskStatus = MaskStatus.PENDING
-    
+
+    # Mask filter verdict (populated by MaskFilter agent)
+    mask_filter_verdict: Optional[MaskFilterVerdict] = None
+
     # Critic verdict (populated by Critic)
     critic_verdict: Optional[CriticVerdict] = None
     
@@ -271,6 +300,7 @@ class CandidateRecord:
             "features": self.features.to_dict() if self.features else None,
             "scores": self.scores.to_dict() if self.scores else None,
             "mask_status": self.mask_status.value,
+            "mask_filter_verdict": self.mask_filter_verdict.to_dict() if self.mask_filter_verdict else None,
             "critic_verdict": self.critic_verdict.to_dict() if self.critic_verdict else None,
             "is_selected": self.is_selected,
         }

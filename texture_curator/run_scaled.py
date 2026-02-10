@@ -175,6 +175,7 @@ class ScalablePipeline:
         quality_threshold: float = 0.3,
         diversity_weight: float = 0.3,
         selection_method: str = "quality_diversity",
+        filter_passed: bool = False,
     ):
         self.rwtd_path = Path(rwtd_path)
         self.source_path = Path(source_path)
@@ -185,6 +186,7 @@ class ScalablePipeline:
         self.quality_threshold = quality_threshold
         self.diversity_weight = diversity_weight
         self.selection_method = selection_method
+        self.filter_passed = filter_passed
         
         # Create output directory
         self.output_path.mkdir(parents=True, exist_ok=True)
@@ -264,42 +266,63 @@ class ScalablePipeline:
         return self._coreset_selector
     
     def discover_candidates(self) -> int:
-        """Discover all image/mask pairs in source directory."""
+        """Discover all image/mask pairs in source directory.
+
+        Supports both flat (images/) and nested (crops/{size}/) structures.
+        When filter_passed=True, uses filter/passed/ instead of crops/.
+        """
         logger.info(f"Discovering candidates in {self.source_path}...")
-        
-        images_dir = self.source_path / "images"
+
         masks_dir = self.source_path / "masks"
-        
-        if not images_dir.exists():
-            raise FileNotFoundError(f"Images directory not found: {images_dir}")
-        
-        # Find all images
-        image_files = sorted(
-            list(images_dir.glob("*.jpg")) +
-            list(images_dir.glob("*.png")) +
-            list(images_dir.glob("*.jpeg"))
-        )
-        
+        crops_dir = self.source_path / "crops"
+        images_dir = self.source_path / "images"
+        filter_passed_dir = self.source_path / "filter" / "passed"
+
+        # Detect source structure
+        if crops_dir.exists():
+            if self.filter_passed:
+                if not filter_passed_dir.exists():
+                    raise FileNotFoundError(f"filter/passed directory not found: {filter_passed_dir}")
+                img_root = filter_passed_dir
+                logger.info(f"Using filtered-passed crops from: {img_root}")
+            else:
+                img_root = crops_dir
+                logger.info(f"Using all crops from: {img_root}")
+
+            image_files = sorted(
+                list(img_root.glob("**/*.jpg")) +
+                list(img_root.glob("**/*.png")) +
+                list(img_root.glob("**/*.jpeg"))
+            )
+        elif images_dir.exists():
+            image_files = sorted(
+                list(images_dir.glob("*.jpg")) +
+                list(images_dir.glob("*.png")) +
+                list(images_dir.glob("*.jpeg"))
+            )
+        else:
+            raise FileNotFoundError(f"No images found. Expected 'crops/' or 'images/' in: {self.source_path}")
+
+        # Build mask lookup (flattened: stem -> path)
+        all_masks = {}
+        for mask_path in (
+            list(masks_dir.glob("**/*.png")) +
+            list(masks_dir.glob("**/*.jpg"))
+        ):
+            all_masks[mask_path.stem] = mask_path
+
         # Find corresponding masks
         for img_path in image_files:
-            # Try different mask naming conventions
-            mask_candidates = [
-                masks_dir / f"{img_path.stem}.png",
-                masks_dir / f"{img_path.stem}_mask.png",
-                masks_dir / f"{img_path.stem}.jpg",
-            ]
-            
-            mask_path = None
-            for candidate in mask_candidates:
-                if candidate.exists():
-                    mask_path = candidate
-                    break
-            
+            stem = img_path.stem
+            mask_path = all_masks.get(stem)
+            if mask_path is None:
+                mask_path = all_masks.get(f"{stem}_mask")
+
             if mask_path:
-                cid = img_path.stem
+                cid = stem
                 self.state.candidate_ids.append(cid)
                 self.state.candidate_paths[cid] = (img_path, mask_path)
-        
+
         logger.info(f"Discovered {len(self.state.candidate_ids)} candidates")
         return len(self.state.candidate_ids)
     
@@ -630,7 +653,9 @@ def main():
     parser.add_argument("--selection-method", type=str, default="quality_diversity",
                        choices=["greedy_quality", "k_center", "maxmin_diversity", "facility_location", "quality_diversity"],
                        help="Selection algorithm")
-    
+    parser.add_argument("--filter-passed", action="store_true",
+                       help="Only use crops that passed the entropy filter")
+
     args = parser.parse_args()
     
     # Validate paths
@@ -653,6 +678,7 @@ def main():
         quality_threshold=args.quality_threshold,
         diversity_weight=args.diversity_weight,
         selection_method=args.selection_method,
+        filter_passed=args.filter_passed,
     )
     
     pipeline.run()

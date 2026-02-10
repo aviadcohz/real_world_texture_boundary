@@ -54,17 +54,20 @@ Orchestrate the workflow between specialized agents to curate a high-quality dat
 
 AGENTS AVAILABLE:
 - profiler: Builds RWTD reference profile (must run first)
-- analyst: Scores candidates against the profile
+- analyst: Discovers and scores candidates against the profile
+- mask_filter: VLM-based mask quality assessment (filters bad masks before scoring)
 - critic: Audits quality using VLM (material vs object transitions)
 - optimizer: Selects diverse final subset
 
 WORKFLOW:
 1. If profile doesn't exist → route to "profiler"
-2. If candidates not scored → route to "analyst"
-3. If quality not verified → route to "critic"
-4. If critic passed quality gate → route to "optimizer"
-5. If critic failed AND can reroute → adjust thresholds, route to "analyst"
-6. If selection complete → route to "done"
+2. If candidates not discovered → route to "analyst"
+3. If masks not filtered → route to "mask_filter"
+4. If candidates not scored → route to "analyst" (scores only valid masks)
+5. If quality not verified → route to "critic"
+6. If critic passed quality gate → route to "optimizer"
+7. If critic failed AND can reroute → adjust thresholds, route to "analyst"
+8. If selection complete → route to "done"
 
 REROUTE RULES:
 - Maximum {max_iterations} reroute iterations
@@ -75,7 +78,7 @@ RESPONSE FORMAT:
 Always respond with valid JSON:
 {{
     "reasoning": "Your step-by-step analysis of current state",
-    "route_to": "profiler|analyst|critic|optimizer|done",
+    "route_to": "profiler|analyst|mask_filter|critic|optimizer|done",
     "threshold_adjustments": {{}}  // Only if rerouting
 }}
 """
@@ -111,6 +114,7 @@ class PlannerAgent(BaseAgent):
         return [
             "route_to_profiler",
             "route_to_analyst",
+            "route_to_mask_filter",
             "route_to_critic",
             "route_to_optimizer",
             "adjust_thresholds",
@@ -127,6 +131,7 @@ class PlannerAgent(BaseAgent):
             "## Progress",
             f"- RWTD Profile: {'✓ Built' if state.profile_exists else '✗ Not built'}",
             f"- Candidates Discovered: {state.num_candidates}",
+            f"- Mask Filter: {'done' if state.mask_filtering_done else 'pending'} ({state.num_mask_passed} passed / {state.num_mask_filtered} assessed)",
             f"- Candidates Scored: {state.num_scored}",
             f"- Candidates Validated: {state.num_validated}",
             f"- Valid (Material Transitions): {state.num_valid}",
@@ -187,13 +192,23 @@ class PlannerAgent(BaseAgent):
             state.current_phase = Phase.PROFILING
             return "profiler", adjustments
         
-        # Rule 2: If no candidates discovered or scored, run analyst
-        if state.num_candidates == 0 or state.num_scored == 0:
+        # Rule 2: If no candidates discovered, run analyst to discover
+        if state.num_candidates == 0:
             state.current_phase = Phase.SCORING
             return "analyst", adjustments
-        
-        # Rule 3: If not all candidates scored, continue scoring
-        if state.num_scored < state.num_candidates:
+
+        # Rule 2.5: If candidates discovered but not mask-filtered, run mask_filter
+        if not state.mask_filtering_done:
+            state.current_phase = Phase.MASK_FILTERING
+            return "mask_filter", adjustments
+
+        # Rule 3: If not scored, run analyst to score (only valid masks will be scored)
+        if state.num_scored == 0:
+            state.current_phase = Phase.SCORING
+            return "analyst", adjustments
+
+        # Rule 3.5: If not all candidates scored, continue scoring
+        if state.num_scored < state.num_mask_passed:
             state.current_phase = Phase.SCORING
             return "analyst", adjustments
         

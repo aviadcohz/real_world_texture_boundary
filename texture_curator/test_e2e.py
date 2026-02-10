@@ -21,7 +21,9 @@ USAGE:
 
 import sys
 import argparse
+import json
 import logging
+import shutil
 import time
 from pathlib import Path
 
@@ -120,19 +122,19 @@ def test_ollama():
     return True
 
 
-def test_profiler(rwtd_path: Path, device: str = "cuda"):
+def test_profiler(rwtd_path: Path, device: str = "cuda", target_n: int = 10):
     """Test the Profiler agent."""
     print("\n" + "=" * 60)
     print("Test 3: Profiler Agent")
     print("=" * 60)
-    
+
     from config.settings import Config
     from state.graph_state import GraphState
     from llm.ollama_client import OllamaClient
     from agents.profiler import ProfilerAgent
-    
+
     # Setup
-    config = Config(rwtd_path=rwtd_path, device=device)
+    config = Config(rwtd_path=rwtd_path, device=device, target_n=target_n)
     state = GraphState(config=config)
     client = OllamaClient(model="qwen2.5:7b")
     
@@ -159,17 +161,18 @@ def test_profiler(rwtd_path: Path, device: str = "cuda"):
         return False, None
 
 
-def test_analyst(state: "GraphState", source_path: Path, device: str = "cuda"):
+def test_analyst(state: "GraphState", source_path: Path, device: str = "cuda", filter_passed: bool = False):
     """Test the Analyst agent."""
     print("\n" + "=" * 60)
     print("Test 4: Analyst Agent")
     print("=" * 60)
-    
+
     from llm.ollama_client import OllamaClient
     from agents.analyst import AnalystAgent
-    
-    # Update config with source path
+
+    # Update config with source path and filter mode
     state.config.source_pool_path = source_path
+    state.config.filter_passed = filter_passed
     
     # Create analyst (share extractors with profiler for efficiency)
     client = OllamaClient(model="qwen2.5:7b")
@@ -269,24 +272,27 @@ def test_optimizer(state: "GraphState"):
         return False
 
 
-def test_full_orchestrator(rwtd_path: Path, source_path: Path, device: str = "cuda"):
+def test_full_orchestrator(rwtd_path: Path, source_path: Path, device: str = "cuda", filter_passed: bool = False, target_n: int = 10, vlm_model: str = "qwen2.5vl:7b", skip_mask_filter: bool = False):
     """Test the full orchestrator."""
     print("\n" + "=" * 60)
     print("Test 7: Full Orchestrator (End-to-End)")
     print("=" * 60)
-    
+
     from config.settings import Config
     from graph.orchestrator import TextureCuratorOrchestrator
-    
+
     # Create config
     config = Config(
         rwtd_path=rwtd_path,
         source_pool_path=source_path,
-        target_n=5,  # Small for testing
-        critic_sample_size=10,
+        target_n=target_n,
+        critic_sample_size=min(20, target_n * 2),
         device=device,
         save_checkpoints=False,  # Faster for testing
+        filter_passed=filter_passed,
     )
+    config.mask_filter.vlm_model = vlm_model
+    config.mask_filter.skip_vlm = skip_mask_filter
     
     print(f"  Config: target_n={config.target_n}, critic_samples={config.critic_sample_size}")
     
@@ -314,20 +320,123 @@ def test_full_orchestrator(rwtd_path: Path, source_path: Path, device: str = "cu
     
     if state.num_selected >= config.target_n:
         print("\n✅ Full orchestrator test passed!")
-        return True
+        return True, state
     else:
         print(f"\n⚠️ Partial success: selected {state.num_selected}/{config.target_n}")
-        return True  # Still count as pass if it ran
+        return True, state  # Still count as pass if it ran
+
+
+def create_overlay(image_path, mask_path, alpha=0.5):
+    """Create an overlay image: mask boundaries shown in green on top of the crop."""
+    import cv2
+    import numpy as np
+    from PIL import Image
+
+    crop = np.array(Image.open(image_path).convert("RGB"))
+    mask = np.array(Image.open(mask_path).convert("L"))
+
+    kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3))
+    mask = cv2.dilate(mask, kernel, iterations=2)
+
+    if mask.shape[:2] != crop.shape[:2]:
+        mask = cv2.resize(mask, (crop.shape[1], crop.shape[0]), interpolation=cv2.INTER_NEAREST)
+
+    overlay = crop.copy()
+    boundary = mask > 127
+    overlay[boundary] = [0, 255, 0]
+
+    result = crop.copy()
+    result[boundary] = (
+        (1 - alpha) * crop[boundary].astype(float) +
+        alpha * overlay[boundary].astype(float)
+    ).astype(np.uint8)
+
+    return Image.fromarray(result)
+
+
+def export_results(state, output_path: Path):
+    """Export selected images, masks, and overlays to flat directories.
+
+    Creates:
+        output_path/images/{stem}.jpg
+        output_path/masks/{stem}.png
+        output_path/overlays/{stem}.jpg
+    """
+    if not hasattr(state, 'selected_ids') or not state.selected_ids:
+        print("\n⚠️ No selected candidates to export.")
+        return
+
+    images_dir = output_path / "images"
+    masks_dir = output_path / "masks"
+    overlays_dir = output_path / "overlays"
+    images_dir.mkdir(parents=True, exist_ok=True)
+    masks_dir.mkdir(parents=True, exist_ok=True)
+    overlays_dir.mkdir(parents=True, exist_ok=True)
+
+    exported = 0
+    for cid in state.selected_ids:
+        candidate = state.candidates.get(cid)
+        if candidate is None:
+            continue
+
+        stem = candidate.image_path.stem
+        # Copy image keeping original extension
+        dst_image = images_dir / candidate.image_path.name
+        shutil.copy2(candidate.image_path, dst_image)
+
+        # Copy mask with same stem (keeps .png extension)
+        dst_mask = masks_dir / f"{stem}{candidate.mask_path.suffix}"
+        shutil.copy2(candidate.mask_path, dst_mask)
+
+        # Generate overlay
+        try:
+            overlay = create_overlay(candidate.image_path, candidate.mask_path)
+            overlay.save(str(overlays_dir / f"{stem}.jpg"), quality=90)
+        except Exception:
+            pass
+
+        exported += 1
+
+    # Save metadata
+    metadata = {
+        "num_exported": exported,
+        "candidates": [
+            {
+                "id": cid,
+                "image": state.candidates[cid].image_path.name if state.candidates.get(cid) else None,
+                "score": float(state.candidates[cid].scores.total_score)
+                    if state.candidates.get(cid) and state.candidates[cid].scores else 0,
+            }
+            for cid in state.selected_ids
+        ],
+    }
+    with open(output_path / "metadata.json", "w") as f:
+        json.dump(metadata, f, indent=2)
+
+    print(f"\n📦 Exported {exported} images to: {output_path}")
+    print(f"   images/   : {exported} files")
+    print(f"   masks/    : {exported} files")
+    print(f"   overlays/ : {exported} files")
 
 
 def main():
     parser = argparse.ArgumentParser(description="End-to-End tests for Texture Curator")
     parser.add_argument("--rwtd", type=str, default="/home/aviad/RWTD",
                        help="Path to RWTD dataset")
-    parser.add_argument("--source", type=str, default="/datasets/ade20k/real_texture_boundaries_20260203",
-                       help="Path to source pool")
+    parser.add_argument("--source", type=str, default="/home/aviad/real_world_texture_boundary/google_landmarks_v2_scale/run_20260208_230720",
+                       help="Path to source pool (supports both flat images/ and nested crops/ structures)")
+    parser.add_argument("--filter-passed", action="store_true", default=False,
+                       help="Only use crops that passed the entropy filter")
+    parser.add_argument("--output", type=str, default="/datasets/google_landmarks_v2_scale/real_world_texture_boundary/results/run_20260208_230720",
+                       help="Output path to export selected images and masks (flat images/ and masks/ dirs)")
+    parser.add_argument("--target-n", type=int, default=17000,
+                       help="Number of images to select (default: 10)")
     parser.add_argument("--device", type=str, default="cuda",
                        help="Device (cuda or cpu)")
+    parser.add_argument("--vlm-model", type=str, default="qwen2.5vl:7b",
+                       help="VLM model for mask quality filter (default: qwen2.5vl:7b)")
+    parser.add_argument("--skip-mask-filter", action="store_true",
+                       help="Skip VLM-based mask quality filtering")
     parser.add_argument("--quick", action="store_true",
                        help="Run quick tests only (skip full orchestrator)")
     parser.add_argument("--full-only", action="store_true",
@@ -355,6 +464,9 @@ def main():
     print("=" * 60)
     print(f"  RWTD: {rwtd_path}")
     print(f"  Source: {source_path}")
+    print(f"  Filter: {'passed only' if args.filter_passed else 'all crops'}")
+    print(f"  Output: {args.output or '(none)'}")
+    print(f"  VLM:    {args.vlm_model}{' (SKIPPED)' if args.skip_mask_filter else ''}")
     print(f"  Device: {args.device}")
     print("=" * 60)
     
@@ -363,7 +475,8 @@ def main():
     
     if args.full_only:
         # Only run full orchestrator
-        results.append(("Full Orchestrator", test_full_orchestrator(rwtd_path, source_path, args.device)))
+        success, state = test_full_orchestrator(rwtd_path, source_path, args.device, args.filter_passed, args.target_n, args.vlm_model, args.skip_mask_filter)
+        results.append(("Full Orchestrator", success))
     else:
         # Test 1: Imports
         results.append(("Imports", test_imports()))
@@ -375,12 +488,12 @@ def main():
             print("\n⚠️ Skipping remaining tests (Ollama not available)")
         else:
             # Test 3: Profiler
-            success, state = test_profiler(rwtd_path, args.device)
+            success, state = test_profiler(rwtd_path, args.device, args.target_n)
             results.append(("Profiler", success))
             
             if success and state:
                 # Test 4: Analyst
-                results.append(("Analyst", test_analyst(state, source_path, args.device)))
+                results.append(("Analyst", test_analyst(state, source_path, args.device, args.filter_passed)))
                 
                 # Test 5: Critic
                 results.append(("Critic", test_critic(state, args.device)))
@@ -390,7 +503,11 @@ def main():
             
             # Test 7: Full Orchestrator (skip if quick mode)
             if not args.quick:
-                results.append(("Full Orchestrator", test_full_orchestrator(rwtd_path, source_path, args.device)))
+                orch_success, orch_state = test_full_orchestrator(rwtd_path, source_path, args.device, args.filter_passed, args.target_n, args.vlm_model, args.skip_mask_filter)
+                results.append(("Full Orchestrator", orch_success))
+                # Prefer the orchestrator state for export (it ran the full pipeline)
+                if orch_state and orch_state.selected_ids:
+                    state = orch_state
     
     # Summary
     print("\n" + "=" * 60)
@@ -409,7 +526,13 @@ def main():
         print("🎉 All tests passed! The system is ready.")
     else:
         print("⚠️ Some tests failed. Please review the output above.")
-    
+
+    # Export results if output path specified and we have a state with selections
+    if args.output and state and hasattr(state, 'selected_ids') and state.selected_ids:
+        export_results(state, Path(args.output))
+    elif args.output:
+        print(f"\n⚠️ No selected candidates to export to {args.output}")
+
     return 0 if all_passed else 1
 
 

@@ -45,6 +45,7 @@ try:
     from agents.analyst import AnalystAgent
     from agents.critic import CriticAgent
     from agents.optimizer import OptimizerAgent
+    from agents.mask_filter import MaskFilterAgent
 except ImportError:
     from .config.settings import Config, Phase
     from .state.graph_state import GraphState, create_initial_state
@@ -54,6 +55,7 @@ except ImportError:
     from .agents.analyst import AnalystAgent
     from .agents.critic import CriticAgent
     from .agents.optimizer import OptimizerAgent
+    from .agents.mask_filter import MaskFilterAgent
 
 
 class TextureCuratorOrchestrator:
@@ -104,11 +106,17 @@ class TextureCuratorOrchestrator:
         self.analyst = AnalystAgent(llm_client=self.llm_client, device=device)
         self.critic = CriticAgent(llm_client=self.llm_client, device=device)
         self.optimizer = OptimizerAgent(llm_client=self.llm_client)
-        
+        self.mask_filter = MaskFilterAgent(
+            llm_client=self.llm_client,
+            vlm_model=config.mask_filter.vlm_model,
+            device=device,
+        )
+
         # Agent registry
         self.agents = {
             "profiler": self.profiler,
             "analyst": self.analyst,
+            "mask_filter": self.mask_filter,
             "critic": self.critic,
             "optimizer": self.optimizer,
         }
@@ -191,7 +199,10 @@ class TextureCuratorOrchestrator:
         
         if agent_name == "profiler":
             return self.profiler.run_full_profiling(self.state)
-        
+
+        elif agent_name == "mask_filter":
+            return self.mask_filter.run_full_filtering(self.state)
+
         elif agent_name == "analyst":
             return self.analyst.run_full_analysis(self.state)
         
@@ -238,6 +249,7 @@ class TextureCuratorOrchestrator:
         """Log current progress."""
         elapsed = time.time() - self.start_time
         logger.info(f"  Progress: candidates={self.state.num_candidates}, "
+                   f"mask_passed={self.state.num_mask_passed}, "
                    f"scored={self.state.num_scored}, "
                    f"validated={self.state.num_validated}, "
                    f"selected={self.state.num_selected}/{self.config.target_n} "

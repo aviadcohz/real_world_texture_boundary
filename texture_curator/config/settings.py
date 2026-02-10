@@ -19,6 +19,7 @@ class Phase(str, Enum):
     """Current phase in the agent workflow."""
     INIT = "init"
     PROFILING = "profiling"
+    MASK_FILTERING = "mask_filtering"
     SCORING = "scoring"
     CRITIQUING = "critiquing"
     OPTIMIZING = "optimizing"
@@ -129,6 +130,30 @@ class VisionConfig:
 
 
 # ============================================
+# Mask Filter Configuration
+# ============================================
+
+@dataclass
+class MaskFilterConfig:
+    """Configuration for VLM-based mask quality filter."""
+
+    # VLM model for mask assessment (via Ollama)
+    vlm_model: str = "qwen2.5vl:7b"
+
+    # Timeout per image (seconds)
+    vlm_timeout: int = 60
+
+    # Use fast math pre-filter to skip obvious failures before VLM
+    enable_prefilter: bool = True
+
+    # Height (px) for the side-by-side composite image sent to VLM
+    composite_height: int = 384
+
+    # Skip VLM filtering entirely (use only prefilter or no filtering)
+    skip_vlm: bool = False
+
+
+# ============================================
 # Main Configuration
 # ============================================
 
@@ -174,6 +199,7 @@ class Config:
     thresholds: ThresholdConfig = field(default_factory=ThresholdConfig)
     llm: LLMConfig = field(default_factory=LLMConfig)
     vision: VisionConfig = field(default_factory=VisionConfig)
+    mask_filter: MaskFilterConfig = field(default_factory=MaskFilterConfig)
     
     # ─────────────────────────────────────────
     # Runtime flags
@@ -187,6 +213,9 @@ class Config:
     
     # Device for PyTorch
     device: str = "cuda"  # "cuda" or "cpu"
+
+    # Only use crops that passed the entropy filter (from filter/passed/)
+    filter_passed: bool = False
     
     def __post_init__(self):
         """Ensure paths exist and are Path objects."""

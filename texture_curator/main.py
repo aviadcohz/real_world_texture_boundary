@@ -128,6 +128,26 @@ Examples:
         help="Device for vision models (default: cuda)"
     )
     
+    # Source filtering
+    parser.add_argument(
+        "--filter-passed",
+        action="store_true",
+        help="Only use crops that passed the entropy filter (from filter/passed/)"
+    )
+
+    # VLM mask filter
+    parser.add_argument(
+        "--vlm-model",
+        type=str,
+        default="qwen2.5vl:7b",
+        help="VLM model for mask quality assessment (default: qwen2.5vl:7b)"
+    )
+    parser.add_argument(
+        "--skip-mask-filter",
+        action="store_true",
+        help="Skip VLM-based mask quality filtering"
+    )
+
     # Threshold overrides
     parser.add_argument(
         "--quality-threshold", 
@@ -167,23 +187,34 @@ def validate_paths(args) -> bool:
     """Validate that required paths exist."""
     rwtd_path = Path(args.rwtd)
     source_path = Path(args.source)
-    
+
     if not rwtd_path.exists():
         print(f"ERROR: RWTD path does not exist: {rwtd_path}")
         return False
-    
+
     if not (rwtd_path / "images").exists():
         print(f"ERROR: RWTD images directory not found: {rwtd_path / 'images'}")
         return False
-    
+
     if not source_path.exists():
         print(f"ERROR: Source pool path does not exist: {source_path}")
         return False
-    
-    if not (source_path / "images").exists():
-        print(f"ERROR: Source pool images directory not found: {source_path / 'images'}")
+
+    # Accept either flat (images/) or nested (crops/) source structure
+    has_images = (source_path / "images").exists()
+    has_crops = (source_path / "crops").exists()
+    if not has_images and not has_crops:
+        print(f"ERROR: Source pool needs 'images/' or 'crops/' directory in: {source_path}")
         return False
-    
+
+    if not (source_path / "masks").exists():
+        print(f"ERROR: Source pool masks directory not found: {source_path / 'masks'}")
+        return False
+
+    if args.filter_passed and not (source_path / "filter" / "passed").exists():
+        print(f"ERROR: filter/passed directory not found in: {source_path}")
+        return False
+
     return True
 
 
@@ -210,11 +241,16 @@ def main():
         device=args.device,
         save_checkpoints=not args.no_checkpoints,
         verbose=args.verbose,
+        filter_passed=args.filter_passed,
     )
     
     # Override thresholds
     config.thresholds.quality_gate_min = args.quality_threshold
     config.thresholds.diversity_weight = args.diversity_weight
+
+    # VLM mask filter settings
+    config.mask_filter.vlm_model = args.vlm_model
+    config.mask_filter.skip_vlm = args.skip_mask_filter
     
     # Print banner
     print()
@@ -223,8 +259,10 @@ def main():
     print("=" * 70)
     print(f"  RWTD Reference:  {args.rwtd}")
     print(f"  Source Pool:     {args.source}")
+    print(f"  Filter Mode:     {'passed only' if args.filter_passed else 'all crops'}")
     print(f"  Target Selection: {args.target_n} images")
     print(f"  LLM Model:       {args.model}")
+    print(f"  VLM Model:       {args.vlm_model}{' (SKIPPED)' if args.skip_mask_filter else ''}")
     print(f"  Device:          {args.device}")
     print("=" * 70)
     print()

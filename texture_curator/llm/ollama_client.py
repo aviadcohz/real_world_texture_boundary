@@ -20,10 +20,12 @@ USAGE:
     json_response = client.chat_json("Return {\"answer\": ...}")
 """
 
+import base64
 import httpx
 import json
 import re
-from typing import Optional, Dict, Any, List
+from pathlib import Path
+from typing import Optional, Dict, Any, List, Union
 from dataclasses import dataclass, field
 from datetime import datetime
 import logging
@@ -41,9 +43,13 @@ class Message:
     """A single message in a conversation."""
     role: str  # "system", "user", "assistant"
     content: str
-    
+    images: Optional[List[str]] = None  # base64-encoded images for vision models
+
     def to_dict(self) -> dict:
-        return {"role": self.role, "content": self.content}
+        d = {"role": self.role, "content": self.content}
+        if self.images:
+            d["images"] = self.images
+        return d
 
 
 @dataclass
@@ -259,6 +265,125 @@ Respond with valid JSON:"""
             else:
                 raise
     
+    @staticmethod
+    def _encode_image(image_path: Union[str, Path]) -> str:
+        """Read an image file and return its base64 encoding."""
+        with open(image_path, "rb") as f:
+            return base64.b64encode(f.read()).decode("utf-8")
+
+    def chat_vision(
+        self,
+        prompt: str,
+        image_paths: List[Union[str, Path]],
+        system_prompt: Optional[str] = None,
+    ) -> "ChatResponse":
+        """
+        Send a vision chat message with images.
+
+        Args:
+            prompt: User message describing what to analyze
+            image_paths: List of image file paths to include
+            system_prompt: Optional system prompt
+
+        Returns:
+            ChatResponse object
+        """
+        images_b64 = [self._encode_image(p) for p in image_paths]
+
+        messages = []
+        if system_prompt:
+            messages.append({"role": "system", "content": system_prompt})
+
+        messages.append({
+            "role": "user",
+            "content": prompt,
+            "images": images_b64,
+        })
+
+        payload = {
+            "model": self.model,
+            "messages": messages,
+            "stream": False,
+            "options": {
+                "temperature": self.temperature,
+                "num_predict": self.max_tokens,
+            },
+        }
+
+        try:
+            response = self.client.post(
+                f"{self.base_url}/api/chat",
+                json=payload,
+            )
+            response.raise_for_status()
+            data = response.json()
+
+            content = data.get("message", {}).get("content", "")
+
+            return ChatResponse(
+                content=content,
+                model=data.get("model", self.model),
+                prompt_tokens=data.get("prompt_eval_count", 0),
+                completion_tokens=data.get("eval_count", 0),
+                total_tokens=data.get("prompt_eval_count", 0) + data.get("eval_count", 0),
+                total_duration_ms=data.get("total_duration", 0) / 1_000_000,
+                raw_response=data,
+            )
+
+        except httpx.TimeoutException:
+            logger.error(f"Vision request timed out after {self.timeout}s")
+            raise TimeoutError(f"Ollama vision request timed out after {self.timeout}s")
+
+        except Exception as e:
+            logger.error(f"Vision chat request failed: {e}")
+            raise
+
+    def chat_vision_json(
+        self,
+        prompt: str,
+        image_paths: List[Union[str, Path]],
+        system_prompt: Optional[str] = None,
+        retry_on_parse_error: bool = True,
+    ) -> Dict[str, Any]:
+        """
+        Send a vision chat message and parse JSON response.
+
+        Args:
+            prompt: User message (should ask for JSON output)
+            image_paths: List of image file paths
+            system_prompt: Optional system prompt
+            retry_on_parse_error: Whether to retry if JSON parsing fails
+
+        Returns:
+            Parsed JSON as dictionary
+        """
+        if system_prompt and "JSON" not in system_prompt.upper():
+            system_prompt += "\n\nIMPORTANT: Always respond with valid JSON only. No markdown, no explanation."
+        elif not system_prompt:
+            system_prompt = "You are a helpful assistant. Always respond with valid JSON only."
+
+        response = self.chat_vision(prompt, image_paths, system_prompt)
+
+        try:
+            return self._parse_json(response.content)
+
+        except json.JSONDecodeError as e:
+            if retry_on_parse_error:
+                logger.warning(f"Vision JSON parse failed, retrying: {e}")
+                # Retry as text-only with the original response for correction
+                retry_prompt = f"""Your previous response was not valid JSON.
+Please respond with ONLY valid JSON, no markdown code blocks, no explanation.
+
+Original request: {prompt}
+
+Your previous answer: {response.content}
+
+Respond with valid JSON:"""
+                retry_response = self.chat(retry_prompt, system_prompt)
+                return self._parse_json(retry_response.content)
+            else:
+                raise
+
     def _parse_json(self, text: str) -> Dict[str, Any]:
         """
         Parse JSON from LLM response.

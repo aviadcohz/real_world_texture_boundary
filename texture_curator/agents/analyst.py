@@ -210,45 +210,87 @@ class AnalystAgent(BaseAgent):
             return ToolResult(success=False, error_message=str(e))
     
     def _discover_candidates(self, state: GraphState) -> ToolResult:
-        """Discover all image/mask pairs in source pool."""
+        """Discover all image/mask pairs in source pool.
+
+        Supports two source structures:
+        1. Flat: source/images/*.jpg + source/masks/*.png
+        2. Nested (texture_boundary_pipeline results):
+           source/crops/{size}/*.jpg + source/masks/{size}/*.png
+           source/filter/passed/{size}/*.jpg (when filter_passed=True)
+        """
         logger.info("Discovering candidates in source pool...")
-        
+
         source_path = state.config.source_pool_path
-        images_dir = source_path / "images"
         masks_dir = source_path / "masks"
-        
-        if not images_dir.exists():
+
+        # Detect source structure: nested (crops/) or flat (images/)
+        crops_dir = source_path / "crops"
+        images_dir = source_path / "images"
+        filter_passed_dir = source_path / "filter" / "passed"
+
+        if crops_dir.exists():
+            # Nested structure from texture_boundary_pipeline
+            if state.config.filter_passed:
+                if not filter_passed_dir.exists():
+                    return ToolResult(
+                        success=False,
+                        error_message=f"filter/passed directory not found: {filter_passed_dir}"
+                    )
+                img_root = filter_passed_dir
+                logger.info(f"Using filtered-passed crops from: {img_root}")
+            else:
+                img_root = crops_dir
+                logger.info(f"Using all crops from: {img_root}")
+
+            # Glob recursively to flatten nested size subdirectories
+            image_paths = sorted(
+                list(img_root.glob("**/*.jpg")) +
+                list(img_root.glob("**/*.png")) +
+                list(img_root.glob("**/*.jpeg"))
+            )
+        elif images_dir.exists():
+            # Flat structure (original format)
+            img_root = images_dir
+            image_paths = sorted(
+                list(images_dir.glob("*.jpg")) +
+                list(images_dir.glob("*.png")) +
+                list(images_dir.glob("*.jpeg"))
+            )
+        else:
             return ToolResult(
                 success=False,
-                error_message=f"Images directory not found: {images_dir}"
+                error_message=f"No images found. Expected 'crops/' or 'images/' in: {source_path}"
             )
-        
-        # Find all images
-        image_paths = sorted(
-            list(images_dir.glob("*.jpg")) + 
-            list(images_dir.glob("*.png")) +
-            list(images_dir.glob("*.jpeg"))
-        )
-        
+
+        if not masks_dir.exists():
+            return ToolResult(
+                success=False,
+                error_message=f"Masks directory not found: {masks_dir}"
+            )
+
+        # Build a lookup of all available masks (flattened: stem -> path)
+        all_masks = {}
+        for mask_path in (
+            list(masks_dir.glob("**/*.png")) +
+            list(masks_dir.glob("**/*.jpg"))
+        ):
+            all_masks[mask_path.stem] = mask_path
+
         # Find corresponding masks and create candidates
         discovered = 0
         for img_path in image_paths:
-            # Try different mask naming conventions
-            mask_candidates = [
-                masks_dir / f"{img_path.stem}.png",
-                masks_dir / f"{img_path.stem}_mask.png",
-                masks_dir / f"{img_path.stem}.jpg",
-            ]
-            
-            mask_path = None
-            for candidate in mask_candidates:
-                if candidate.exists():
-                    mask_path = candidate
-                    break
-            
+            stem = img_path.stem
+
+            # Try to find mask by stem match (works across subdirectories)
+            mask_path = all_masks.get(stem)
+
+            # Fallback: try _mask suffix convention
+            if mask_path is None:
+                mask_path = all_masks.get(f"{stem}_mask")
+
             if mask_path:
-                candidate_id = img_path.stem
-                
+                candidate_id = stem
+
                 # Only add if not already present
                 if candidate_id not in state.candidates:
                     state.candidates[candidate_id] = CandidateRecord(
@@ -257,7 +299,7 @@ class AnalystAgent(BaseAgent):
                         mask_path=mask_path,
                     )
                     discovered += 1
-        
+
         return ToolResult(
             success=True,
             data={
@@ -274,10 +316,11 @@ class AnalystAgent(BaseAgent):
         """Extract features for candidates."""
         logger.info("Extracting features for candidates...")
         
-        # Get candidates without features
+        # Get candidates without features (skip rejected masks)
+        from config.settings import MaskStatus
         candidates_to_process = [
             c for c in state.candidates.values()
-            if c.features is None
+            if c.features is None and c.mask_status != MaskStatus.REJECTED
         ]
         
         # Limit batch size if specified
@@ -364,10 +407,11 @@ class AnalystAgent(BaseAgent):
         profile = state.rwtd_profile
         thresholds = state.config.thresholds
         
-        # Get candidates with features but no scores
+        # Get candidates with features but no scores (skip rejected masks)
+        from config.settings import MaskStatus
         candidates_to_score = [
             c for c in state.candidates.values()
-            if c.features is not None and c.scores is None
+            if c.features is not None and c.scores is None and c.mask_status != MaskStatus.REJECTED
         ]
         
         if not candidates_to_score:

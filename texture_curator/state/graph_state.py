@@ -83,6 +83,9 @@ class GraphState:
     # History of reroutes (for debugging)
     reroute_history: List[RerouteRecord] = field(default_factory=list)
     
+    # Mask filtering status
+    mask_filtering_done: bool = False
+
     # Error tracking
     last_error: Optional[str] = None
     
@@ -129,6 +132,18 @@ class GraphState:
             if c.critic_verdict is not None and c.critic_verdict.is_material_transition
         )
     
+    @property
+    def num_mask_filtered(self) -> int:
+        """Number of candidates that have been assessed by mask filter."""
+        from config.settings import MaskStatus
+        return sum(1 for c in self.candidates.values() if c.mask_status != MaskStatus.PENDING)
+
+    @property
+    def num_mask_passed(self) -> int:
+        """Number of candidates that passed mask filter."""
+        from config.settings import MaskStatus
+        return sum(1 for c in self.candidates.values() if c.mask_status == MaskStatus.VALID)
+
     @property
     def num_selected(self) -> int:
         """Number of candidates selected for final dataset."""
@@ -209,6 +224,7 @@ class GraphState:
             f"- Phase: {self.current_phase.value}",
             f"- RWTD Profile: {'✓ Built' if self.profile_exists else '✗ Not built'}",
             f"- Candidates Discovered: {self.num_candidates}",
+            f"- Mask Filter: {'done' if self.mask_filtering_done else 'pending'} ({self.num_mask_passed} passed / {self.num_mask_filtered} assessed)",
             f"- Candidates Scored: {self.num_scored}/{self.num_candidates}",
             f"- Candidates Validated: {self.num_validated}",
             f"- Valid (Material Transitions): {self.num_valid}",
