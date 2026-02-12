@@ -188,14 +188,12 @@ Always respond with valid JSON: {"reasoning": "...", "tool": "...", "params": {}
     print("\n--- Test 2: After Profiling (mock profile exists) ---")
     
     # Mock: pretend profile exists
-    from state.models import RWTDProfile, Distribution
+    from state.models import RWTDProfile
     import numpy as np
-    
+
     state.rwtd_profile = RWTDProfile(
         num_samples=256,
         centroid_embedding=np.random.randn(768).astype(np.float32),
-        entropy_distribution=Distribution(mean=5.0, std=1.0, min_val=2.0, max_val=8.0),
-        boundary_sharpness_distribution=Distribution(mean=100.0, std=30.0, min_val=20.0, max_val=200.0),
     )
     
     print(f"State: profile={state.profile_exists}, candidates={state.num_candidates}")

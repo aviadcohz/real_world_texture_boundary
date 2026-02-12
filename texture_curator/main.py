@@ -15,9 +15,9 @@ USAGE:
     python main.py --device cpu
 
 WORKFLOW:
-    1. Profiler: Builds RWTD reference profile
-    2. Analyst: Scores candidates from source pool
-    3. Critic: Audits quality (material vs object transitions)
+    1. Profiler: Builds RWTD reference profile (DINOv2 centroid)
+    2. Analyst: Discovers and scores candidates (cosine similarity)
+    3. MaskFilter: VLM-based mask quality filter
     4. Optimizer: Selects diverse final subset
     
 OUTPUT:
@@ -100,19 +100,6 @@ Examples:
         default=10,
         help="Number of samples to select (default: 10)"
     )
-    parser.add_argument(
-        "--critic-samples", 
-        type=int, 
-        default=20,
-        help="Number of samples for critic to review (default: 20)"
-    )
-    parser.add_argument(
-        "--max-iterations", 
-        type=int, 
-        default=3,
-        help="Maximum reroute iterations (default: 3)"
-    )
-    
     # Model settings
     parser.add_argument(
         "--model", 
@@ -149,12 +136,6 @@ Examples:
     )
 
     # Threshold overrides
-    parser.add_argument(
-        "--quality-threshold", 
-        type=float, 
-        default=0.7,
-        help="Quality gate threshold for critic (default: 0.7)"
-    )
     parser.add_argument(
         "--diversity-weight", 
         type=float, 
@@ -236,8 +217,6 @@ def main():
         source_pool_path=Path(args.source),
         output_path=Path(args.output),
         target_n=args.target_n,
-        critic_sample_size=args.critic_samples,
-        max_iterations=args.max_iterations,
         device=args.device,
         save_checkpoints=not args.no_checkpoints,
         verbose=args.verbose,
@@ -245,7 +224,6 @@ def main():
     )
     
     # Override thresholds
-    config.thresholds.quality_gate_min = args.quality_threshold
     config.thresholds.diversity_weight = args.diversity_weight
 
     # VLM mask filter settings

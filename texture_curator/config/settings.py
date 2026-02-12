@@ -21,7 +21,6 @@ class Phase(str, Enum):
     PROFILING = "profiling"
     MASK_FILTERING = "mask_filtering"
     SCORING = "scoring"
-    CRITIQUING = "critiquing"
     OPTIMIZING = "optimizing"
     DONE = "done"
 
@@ -42,38 +41,16 @@ class MaskStatus(str, Enum):
 @dataclass
 class ThresholdConfig:
     """
-    All thresholds used for filtering and quality gates.
-    
-    These can be adjusted by the Planner agent during rerouting.
+    Thresholds used for filtering and selection.
     """
-    
-    # Semantic similarity (cosine) - minimum to consider
-    semantic_min: float = 0.6
-    
-    # Boundary sharpness (Variance of Laplacian) - minimum
-    boundary_sharpness_min: float = 50.0
-    
-    # Quality gate for Critic (ratio of good transitions)
-    quality_gate_min: float = 0.7
-    
+
     # Diversity weight in final selection (0 = only quality, 1 = only diversity)
     diversity_weight: float = 0.3
-    
-    # Score weights for combining metrics
-    weight_semantic: float = 0.4
-    weight_texture: float = 0.3
-    weight_boundary: float = 0.3
-    
+
     def to_dict(self) -> dict:
         """Convert to dictionary for serialization."""
         return {
-            "semantic_min": self.semantic_min,
-            "boundary_sharpness_min": self.boundary_sharpness_min,
-            "quality_gate_min": self.quality_gate_min,
             "diversity_weight": self.diversity_weight,
-            "weight_semantic": self.weight_semantic,
-            "weight_texture": self.weight_texture,
-            "weight_boundary": self.weight_boundary,
         }
 
 
@@ -185,12 +162,9 @@ class Config:
     
     # Number of samples to select in final dataset
     target_n: int = 10
-    
-    # Maximum reroute iterations (prevent infinite loops)
-    max_iterations: int = 3
-    
-    # Number of top candidates for Critic to review
-    critic_sample_size: int = 20
+
+    # Max candidates to discover (0 = all). Random sample for quick testing.
+    max_candidates: int = 0
     
     # ─────────────────────────────────────────
     # Sub-configurations
@@ -251,8 +225,6 @@ class Config:
             "output_path": str(self.output_path),
             "checkpoint_path": str(self.checkpoint_path),
             "target_n": self.target_n,
-            "max_iterations": self.max_iterations,
-            "critic_sample_size": self.critic_sample_size,
             "thresholds": self.thresholds.to_dict(),
             "device": self.device,
         }
@@ -311,9 +283,7 @@ if __name__ == "__main__":
     print(f"Device: {config.device}")
     print()
     print("Thresholds:")
-    print(f"  Semantic Min: {config.thresholds.semantic_min}")
-    print(f"  Boundary Sharpness Min: {config.thresholds.boundary_sharpness_min}")
-    print(f"  Quality Gate: {config.thresholds.quality_gate_min}")
+    print(f"  Diversity Weight: {config.thresholds.diversity_weight}")
     print()
     print("LLM Config:")
     print(f"  Model: {config.llm.model_name}")

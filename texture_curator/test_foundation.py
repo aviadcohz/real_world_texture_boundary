@@ -52,29 +52,16 @@ def test_models():
     
     import numpy as np
     from state.models import (
-        Distribution,
         RWTDProfile,
         CandidateFeatures,
         CandidateRecord,
         ScoreBreakdown,
     )
-    
-    # Test Distribution
-    values = np.random.normal(100, 20, 256)
-    dist = Distribution.from_values(values)
-    print(f"✓ Distribution created from {len(values)} values")
-    print(f"  - Mean: {dist.mean:.2f}")
-    print(f"  - Std: {dist.std:.2f}")
-    print(f"  - Score at mean: {dist.score_value(dist.mean):.2f}")
-    print(f"  - Score at +2σ: {dist.score_value(dist.mean + 2*dist.std):.2f}")
-    print()
-    
+
     # Test RWTDProfile
     profile = RWTDProfile(
         num_samples=256,
         centroid_embedding=np.random.randn(768).astype(np.float32),
-        entropy_distribution=dist,
-        boundary_sharpness_distribution=dist,
     )
     print(f"✓ RWTDProfile created")
     print(f"  - Num samples: {profile.num_samples}")
@@ -119,7 +106,6 @@ def test_graph_state():
     print(f"  - profile_exists: {state.profile_exists}")
     print(f"  - num_candidates: {state.num_candidates}")
     print(f"  - is_done: {state.is_done}")
-    print(f"  - can_reroute: {state.can_reroute}")
     print()
     
     # Test serialization

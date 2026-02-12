@@ -17,10 +17,8 @@ from config.settings import Config, Phase
 from state.models import (
     RWTDProfile,
     CandidateRecord,
-    CriticReport,
     SelectionReport,
     AgentMessage,
-    RerouteRecord,
 )
 
 
@@ -58,12 +56,6 @@ class GraphState:
     candidates: Dict[str, CandidateRecord] = field(default_factory=dict)
     
     # ═══════════════════════════════════════════════════════════════
-    # PHASE 3 OUTPUT: Critic Results
-    # ═══════════════════════════════════════════════════════════════
-    
-    critic_report: Optional[CriticReport] = None
-    
-    # ═══════════════════════════════════════════════════════════════
     # PHASE 4 OUTPUT: Final Selection
     # ═══════════════════════════════════════════════════════════════
     
@@ -76,13 +68,7 @@ class GraphState:
     
     # Current phase in the workflow
     current_phase: Phase = Phase.INIT
-    
-    # Iteration counter (increments on each reroute)
-    iteration: int = 0
-    
-    # History of reroutes (for debugging)
-    reroute_history: List[RerouteRecord] = field(default_factory=list)
-    
+
     # Mask filtering status
     mask_filtering_done: bool = False
 
@@ -120,19 +106,6 @@ class GraphState:
         return sum(1 for c in self.candidates.values() if c.scores is not None)
     
     @property
-    def num_validated(self) -> int:
-        """Number of candidates reviewed by Critic."""
-        return sum(1 for c in self.candidates.values() if c.critic_verdict is not None)
-    
-    @property
-    def num_valid(self) -> int:
-        """Number of candidates that passed Critic review."""
-        return sum(
-            1 for c in self.candidates.values() 
-            if c.critic_verdict is not None and c.critic_verdict.is_material_transition
-        )
-    
-    @property
     def num_mask_filtered(self) -> int:
         """Number of candidates that have been assessed by mask filter."""
         from config.settings import MaskStatus
@@ -153,11 +126,6 @@ class GraphState:
     def is_done(self) -> bool:
         """Check if curation is complete."""
         return self.current_phase == Phase.DONE
-    
-    @property
-    def can_reroute(self) -> bool:
-        """Check if we can still reroute (haven't hit max iterations)."""
-        return self.iteration < self.config.max_iterations
     
     # ═══════════════════════════════════════════════════════════════
     # METHODS
@@ -187,30 +155,21 @@ class GraphState:
         
         return candidates_list[:n]
     
-    def get_valid_candidates(self) -> List[CandidateRecord]:
-        """Get all candidates that passed Critic review."""
-        return [
+    def get_scored_candidates(self) -> List[CandidateRecord]:
+        """Get all scored candidates that passed mask filter, sorted by score descending."""
+        from config.settings import MaskStatus
+        candidates = [
             c for c in self.candidates.values()
-            if c.critic_verdict is not None and c.critic_verdict.is_material_transition
+            if c.scores is not None and c.mask_status == MaskStatus.VALID
         ]
-    
+        candidates.sort(key=lambda c: c.scores.total_score, reverse=True)
+        return candidates
+
     def add_message(self, agent: str, role: str, content: str):
         """Add a message to the conversation history."""
         self.message_history.append(
             AgentMessage(agent=agent, role=role, content=content)
         )
-        self.last_updated = datetime.now()
-    
-    def record_reroute(self, reason: str, adjustments: Dict[str, float]):
-        """Record a reroute decision."""
-        self.reroute_history.append(
-            RerouteRecord(
-                iteration=self.iteration,
-                reason=reason,
-                threshold_adjustments=adjustments,
-            )
-        )
-        self.iteration += 1
         self.last_updated = datetime.now()
     
     def get_status_summary(self) -> str:
@@ -220,23 +179,15 @@ class GraphState:
         This is what gets sent to the Planner agent.
         """
         lines = [
-            f"## Current State (Iteration {self.iteration})",
+            f"## Current State",
             f"- Phase: {self.current_phase.value}",
             f"- RWTD Profile: {'✓ Built' if self.profile_exists else '✗ Not built'}",
             f"- Candidates Discovered: {self.num_candidates}",
             f"- Mask Filter: {'done' if self.mask_filtering_done else 'pending'} ({self.num_mask_passed} passed / {self.num_mask_filtered} assessed)",
             f"- Candidates Scored: {self.num_scored}/{self.num_candidates}",
-            f"- Candidates Validated: {self.num_validated}",
-            f"- Valid (Material Transitions): {self.num_valid}",
             f"- Selected: {self.num_selected}/{self.config.target_n}",
         ]
-        
-        if self.critic_report:
-            lines.append(f"- Quality Score: {self.critic_report.quality_score:.2%}")
-        
-        if self.reroute_history:
-            lines.append(f"- Reroutes: {len(self.reroute_history)}")
-        
+
         if self.last_error:
             lines.append(f"- Last Error: {self.last_error}")
         
@@ -272,18 +223,13 @@ class GraphState:
         return {
             "config": self.config.to_dict(),
             "current_phase": self.current_phase.value,
-            "iteration": self.iteration,
             "profile_exists": self.profile_exists,
             "rwtd_profile": self.rwtd_profile.to_dict() if self.rwtd_profile else None,
             "num_candidates": self.num_candidates,
             "num_scored": self.num_scored,
-            "num_validated": self.num_validated,
-            "num_valid": self.num_valid,
             "num_selected": self.num_selected,
             "selected_ids": self.selected_ids,
-            "critic_report": self.critic_report.to_dict() if self.critic_report else None,
             "selection_report": self.selection_report.to_dict() if self.selection_report else None,
-            "reroute_history": [r.to_dict() for r in self.reroute_history],
             "message_count": len(self.message_history),
             "started_at": self.started_at.isoformat(),
             "last_updated": self.last_updated.isoformat(),

@@ -341,30 +341,21 @@ class BaseAgent(ABC):
 
 TOOL_DESCRIPTIONS = {
     # Profiling tools
-    "profile_rwtd": "Build statistical profile of RWTD reference dataset",
-    "analyze_profile": "Get statistics about the built profile",
-    
+    "profile_rwtd": "Build RWTD centroid from DINOv2 embeddings",
+
     # Feature extraction
-    "extract_features": "Extract DINOv2 embeddings and texture stats for candidates",
-    
+    "extract_features": "Extract DINOv2 embeddings for candidates",
+
     # Scoring
-    "score_candidates": "Score candidates against RWTD profile",
+    "score_candidates": "Score candidates by cosine similarity to centroid",
     "get_top_candidates": "Get top N candidates by score",
-    
-    # Mask operations
-    "validate_masks": "Check mask quality (VoL, edge density)",
-    "clean_mask": "Attempt to fix a noisy mask",
-    
-    # Critic tools
-    "vlm_audit": "Use VLM to check if transition is material-based",
-    
+
     # Selection
     "select_diverse": "Select diverse top-N using coreset selection",
-    
+
     # Utility
     "get_status": "Get current state summary",
-    "inspect_candidate": "Get detailed info about a specific candidate",
-    
+
     # Control
     "done": "Mark task as complete",
     "route_to": "Route to another agent",

@@ -3,9 +3,9 @@
 End-to-End Test for Texture Curator.
 
 This script tests the complete multi-agent pipeline:
-1. Profiler builds RWTD profile
-2. Analyst scores candidates
-3. Critic audits quality
+1. Profiler builds RWTD profile (DINOv2 centroid)
+2. Analyst discovers and scores candidates (cosine similarity)
+3. MaskFilter validates crop+mask pairs (VLM)
 4. Optimizer selects diverse subset
 
 USAGE:
@@ -57,13 +57,11 @@ def test_imports():
         ("agents.base", "BaseAgent"),
         ("agents.profiler", "ProfilerAgent"),
         ("agents.analyst", "AnalystAgent"),
-        ("agents.critic", "CriticAgent"),
         ("agents.optimizer", "OptimizerAgent"),
+        ("agents.mask_filter", "MaskFilterAgent"),
         ("agents.planner", "PlannerAgent"),
         ("graph.orchestrator", "TextureCuratorOrchestrator"),
         ("mcp_servers.vision.dino_extractor", "DINOv2Extractor"),
-        ("mcp_servers.vision.texture_stats", "TextureStatsExtractor"),
-        ("mcp_servers.vision.boundary_metrics", "BoundaryMetricsExtractor"),
     ]
     
     all_ok = True
@@ -122,7 +120,7 @@ def test_ollama():
     return True
 
 
-def test_profiler(rwtd_path: Path, device: str = "cuda", target_n: int = 10):
+def test_profiler(rwtd_path: Path, device: str = "cuda", target_n: int = 10, max_candidates: int = 0):
     """Test the Profiler agent."""
     print("\n" + "=" * 60)
     print("Test 3: Profiler Agent")
@@ -134,7 +132,7 @@ def test_profiler(rwtd_path: Path, device: str = "cuda", target_n: int = 10):
     from agents.profiler import ProfilerAgent
 
     # Setup
-    config = Config(rwtd_path=rwtd_path, device=device, target_n=target_n)
+    config = Config(rwtd_path=rwtd_path, device=device, target_n=target_n, max_candidates=max_candidates)
     state = GraphState(config=config)
     client = OllamaClient(model="qwen2.5:7b")
     
@@ -151,8 +149,7 @@ def test_profiler(rwtd_path: Path, device: str = "cuda", target_n: int = 10):
     if result.success:
         print(f"  ✓ Profiling complete in {elapsed:.1f}s")
         print(f"    - Samples: {state.rwtd_profile.num_samples}")
-        print(f"    - Centroid norm: {state.rwtd_profile.centroid_embedding.sum():.2f}")
-        print(f"    - Entropy mean: {state.rwtd_profile.entropy_distribution.mean:.2f}")
+        print(f"    - Centroid dim: {len(state.rwtd_profile.centroid_embedding)}")
         print("\n✅ Profiler test passed")
         return True, state
     else:
@@ -204,54 +201,26 @@ def test_analyst(state: "GraphState", source_path: Path, device: str = "cuda", f
         return False
 
 
-def test_critic(state: "GraphState", device: str = "cuda"):
-    """Test the Critic agent."""
-    print("\n" + "=" * 60)
-    print("Test 5: Critic Agent")
-    print("=" * 60)
-    
-    from llm.ollama_client import OllamaClient
-    from agents.critic import CriticAgent
-    
-    # Create critic
-    client = OllamaClient(model="qwen2.5:7b")
-    critic = CriticAgent(llm_client=client, device=device)
-    print(f"  ✓ Critic created")
-    
-    # Run critique (sample fewer for testing)
-    print("  Running quality audit...")
-    start = time.time()
-    result = critic.run_full_critique(state, n_samples=min(10, state.num_scored))
-    elapsed = time.time() - start
-    
-    if result.success:
-        print(f"  ✓ Critique complete in {elapsed:.1f}s")
-        print(f"    - Reviewed: {state.critic_report.samples_reviewed}")
-        print(f"    - Material transitions: {state.critic_report.material_transitions}")
-        print(f"    - Object boundaries: {state.critic_report.object_boundaries}")
-        print(f"    - Quality score: {state.critic_report.quality_score:.0%}")
-        print("\n✅ Critic test passed")
-        return True
-    else:
-        print(f"  ✗ Critique failed: {result.error_message}")
-        print("\n❌ Critic test failed")
-        return False
-
-
 def test_optimizer(state: "GraphState"):
     """Test the Optimizer agent."""
     print("\n" + "=" * 60)
-    print("Test 6: Optimizer Agent")
+    print("Test 5: Optimizer Agent")
     print("=" * 60)
-    
+
     from llm.ollama_client import OllamaClient
     from agents.optimizer import OptimizerAgent
-    
+    from config.settings import MaskStatus
+
+    # Mark all scored candidates as VALID (no mask filter in standalone test)
+    for c in state.candidates.values():
+        if c.scores is not None and c.mask_status == MaskStatus.PENDING:
+            c.mask_status = MaskStatus.VALID
+
     # Create optimizer
     client = OllamaClient(model="qwen2.5:7b")
     optimizer = OptimizerAgent(llm_client=client)
     print(f"  ✓ Optimizer created")
-    
+
     # Run optimization
     print("  Running diverse selection...")
     start = time.time()
@@ -272,7 +241,7 @@ def test_optimizer(state: "GraphState"):
         return False
 
 
-def test_full_orchestrator(rwtd_path: Path, source_path: Path, device: str = "cuda", filter_passed: bool = False, target_n: int = 10, vlm_model: str = "qwen2.5vl:7b", skip_mask_filter: bool = False):
+def test_full_orchestrator(rwtd_path: Path, source_path: Path, device: str = "cuda", filter_passed: bool = False, target_n: int = 10, vlm_model: str = "qwen2.5vl:7b", skip_mask_filter: bool = False, max_candidates: int = 0):
     """Test the full orchestrator."""
     print("\n" + "=" * 60)
     print("Test 7: Full Orchestrator (End-to-End)")
@@ -286,15 +255,15 @@ def test_full_orchestrator(rwtd_path: Path, source_path: Path, device: str = "cu
         rwtd_path=rwtd_path,
         source_pool_path=source_path,
         target_n=target_n,
-        critic_sample_size=min(20, target_n * 2),
+        max_candidates=max_candidates,
         device=device,
         save_checkpoints=False,  # Faster for testing
         filter_passed=filter_passed,
     )
     config.mask_filter.vlm_model = vlm_model
     config.mask_filter.skip_vlm = skip_mask_filter
-    
-    print(f"  Config: target_n={config.target_n}, critic_samples={config.critic_sample_size}")
+
+    print(f"  Config: target_n={config.target_n}, max_candidates={config.max_candidates or 'all'}")
     
     # Create orchestrator
     orchestrator = TextureCuratorOrchestrator(
@@ -304,20 +273,20 @@ def test_full_orchestrator(rwtd_path: Path, source_path: Path, device: str = "cu
         save_checkpoints=False,
     )
     print(f"  ✓ Orchestrator created")
-    
+
     # Run
     print("  Running full workflow...")
     start = time.time()
     state = orchestrator.run(max_steps=20)
     elapsed = time.time() - start
-    
+
     print(f"\n  Completed in {elapsed:.1f}s")
     print(f"    - Final phase: {state.current_phase.value}")
     print(f"    - Candidates: {state.num_candidates}")
     print(f"    - Scored: {state.num_scored}")
-    print(f"    - Validated: {state.num_validated}")
+    print(f"    - Mask Passed: {state.num_mask_passed}")
     print(f"    - Selected: {state.num_selected}/{config.target_n}")
-    
+
     if state.num_selected >= config.target_n:
         print("\n✅ Full orchestrator test passed!")
         return True, state
@@ -425,22 +394,24 @@ def main():
                        help="Path to RWTD dataset")
     parser.add_argument("--source", type=str, default="/home/aviad/real_world_texture_boundary/google_landmarks_v2_scale/run_20260208_230720",
                        help="Path to source pool (supports both flat images/ and nested crops/ structures)")
-    parser.add_argument("--filter-passed", action="store_true", default=False,
+    parser.add_argument("--filter-passed", action="store_true", default=True,
                        help="Only use crops that passed the entropy filter")
     parser.add_argument("--output", type=str, default="/datasets/google_landmarks_v2_scale/real_world_texture_boundary/results/run_20260208_230720",
                        help="Output path to export selected images and masks (flat images/ and masks/ dirs)")
     parser.add_argument("--target-n", type=int, default=17000,
-                       help="Number of images to select (default: 10)")
+                       help="Number of images to select (default: 17000)")
     parser.add_argument("--device", type=str, default="cuda",
                        help="Device (cuda or cpu)")
     parser.add_argument("--vlm-model", type=str, default="qwen2.5vl:7b",
                        help="VLM model for mask quality filter (default: qwen2.5vl:7b)")
     parser.add_argument("--skip-mask-filter", action="store_true",
                        help="Skip VLM-based mask quality filtering")
+    parser.add_argument("--max-candidates", type=int, default=0,
+                       help="Max candidates to discover (0=all). Use e.g. 100 for quick testing.")
     parser.add_argument("--quick", action="store_true",
-                       help="Run quick tests only (skip full orchestrator)")
+                       help="Run quick smoke tests only (imports, ollama, profiler, analyst, optimizer)")
     parser.add_argument("--full-only", action="store_true",
-                       help="Run only the full orchestrator test")
+                       help="Skip smoke tests, run only the full orchestrator pipeline")
     args = parser.parse_args()
     
     # args.quick = True
@@ -465,49 +436,43 @@ def main():
     print(f"  RWTD: {rwtd_path}")
     print(f"  Source: {source_path}")
     print(f"  Filter: {'passed only' if args.filter_passed else 'all crops'}")
+    print(f"  Target: {args.target_n} images")
+    print(f"  Candidates: {args.max_candidates or 'all'}")
     print(f"  Output: {args.output or '(none)'}")
     print(f"  VLM:    {args.vlm_model}{' (SKIPPED)' if args.skip_mask_filter else ''}")
     print(f"  Device: {args.device}")
+    print(f"  Mode:   {'quick' if args.quick else 'full-only' if args.full_only else 'full pipeline'}")
     print("=" * 60)
     
     results = []
     state = None
     
-    if args.full_only:
-        # Only run full orchestrator
-        success, state = test_full_orchestrator(rwtd_path, source_path, args.device, args.filter_passed, args.target_n, args.vlm_model, args.skip_mask_filter)
-        results.append(("Full Orchestrator", success))
-    else:
-        # Test 1: Imports
+    if args.quick:
+        # Quick smoke tests: imports, ollama, individual agents with --max-candidates
         results.append(("Imports", test_imports()))
-        
-        # Test 2: Ollama
         results.append(("Ollama", test_ollama()))
-        
+
         if not results[-1][1]:
             print("\n⚠️ Skipping remaining tests (Ollama not available)")
         else:
-            # Test 3: Profiler
-            success, state = test_profiler(rwtd_path, args.device, args.target_n)
+            quick_max = args.max_candidates if args.max_candidates > 0 else 100
+            success, state = test_profiler(rwtd_path, args.device, args.target_n, quick_max)
             results.append(("Profiler", success))
-            
+
             if success and state:
-                # Test 4: Analyst
                 results.append(("Analyst", test_analyst(state, source_path, args.device, args.filter_passed)))
-                
-                # Test 5: Critic
-                results.append(("Critic", test_critic(state, args.device)))
-                
-                # Test 6: Optimizer
                 results.append(("Optimizer", test_optimizer(state)))
-            
-            # Test 7: Full Orchestrator (skip if quick mode)
-            if not args.quick:
-                orch_success, orch_state = test_full_orchestrator(rwtd_path, source_path, args.device, args.filter_passed, args.target_n, args.vlm_model, args.skip_mask_filter)
-                results.append(("Full Orchestrator", orch_success))
-                # Prefer the orchestrator state for export (it ran the full pipeline)
-                if orch_state and orch_state.selected_ids:
-                    state = orch_state
+    else:
+        # Full pipeline (default): smoke checks then full orchestrator
+        if not args.full_only:
+            results.append(("Imports", test_imports()))
+            results.append(("Ollama", test_ollama()))
+            if not results[-1][1]:
+                print("\n⚠️ Skipping pipeline (Ollama not available)")
+
+        if args.full_only or (results and results[-1][1]):
+            success, state = test_full_orchestrator(rwtd_path, source_path, args.device, args.filter_passed, args.target_n, args.vlm_model, args.skip_mask_filter, args.max_candidates)
+            results.append(("Full Orchestrator", success))
     
     # Summary
     print("\n" + "=" * 60)
