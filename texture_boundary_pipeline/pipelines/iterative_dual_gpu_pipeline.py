@@ -13,6 +13,8 @@ import torch
 import json
 import shutil
 from PIL import Image
+import numpy as np
+import cv2
 import time
 
 from models import BaseVLM, QwenVLMClient
@@ -267,6 +269,23 @@ class IterativeDualGPUPipeline:
                     print(f"   Passed: {mask_filter_stats['passed']}")
                     print(f"   Failed: {mask_filter_stats['failed']}")
                     print(f"   Pass rate: {mask_filter_stats['pass_rate']}%")
+
+                # STEP 6: Generate layouts (crop with mask boundary in green)
+                if self.verbose:
+                    print("\n" + "="*70)
+                    print("STEP 6: GENERATING LAYOUTS")
+                    print("="*70)
+
+                layouts_dir = self.run_dir / "layouts"
+                layout_stats = self._generate_layouts(
+                    crops_dir=crops_dir,
+                    masks_dir=masks_dir,
+                    layouts_dir=layouts_dir
+                )
+                all_steps.append({
+                    'step': 'layout_generation',
+                    **layout_stats
+                })
 
         # Final summary
         total_time = time.time() - start_time
@@ -733,6 +752,65 @@ class IterativeDualGPUPipeline:
         }
 
         return summary
+
+    def _generate_layouts(self, crops_dir: Path, masks_dir: Path, layouts_dir: Path, alpha: float = 0.5) -> Dict:
+        """Generate layout images: crop with mask boundary emphasized in green.
+
+        Produces a flat directory of layout images (no size subdirectories).
+        Uses the same overlay style as test_e2e.py create_overlay.
+        """
+        layouts_dir.mkdir(parents=True, exist_ok=True)
+
+        generated = 0
+        errors = 0
+
+        for category in ['tiny', 'small', 'medium', 'large', 'xlarge']:
+            category_crop_dir = crops_dir / category
+            category_mask_dir = masks_dir / category
+            if not category_crop_dir.exists() or not category_mask_dir.exists():
+                continue
+
+            for crop_path in sorted(category_crop_dir.glob("*.jpg")):
+                mask_filename = crop_path.stem + ".png"
+                mask_path = category_mask_dir / mask_filename
+                if not mask_path.exists():
+                    continue
+
+                try:
+                    crop = np.array(Image.open(crop_path).convert("RGB"))
+                    mask = np.array(Image.open(mask_path).convert("L"))
+
+                    # Dilate mask to emphasize boundary
+                    kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3))
+                    mask = cv2.dilate(mask, kernel, iterations=2)
+
+                    if mask.shape[:2] != crop.shape[:2]:
+                        mask = cv2.resize(mask, (crop.shape[1], crop.shape[0]), interpolation=cv2.INTER_NEAREST)
+
+                    boundary = mask > 127
+                    overlay = crop.copy()
+                    overlay[boundary] = [0, 255, 0]
+
+                    result = crop.copy()
+                    result[boundary] = (
+                        (1 - alpha) * crop[boundary].astype(float) +
+                        alpha * overlay[boundary].astype(float)
+                    ).astype(np.uint8)
+
+                    # Save flat (no size subdirectory)
+                    out_path = layouts_dir / crop_path.name
+                    Image.fromarray(result).save(str(out_path), quality=90)
+                    generated += 1
+                except Exception as e:
+                    errors += 1
+                    if self.verbose:
+                        print(f"      Layout error for {crop_path.name}: {e}")
+
+        if self.verbose:
+            print(f"\n   ✅ Layouts generated: {generated} (errors: {errors})")
+            print(f"   📁 {layouts_dir}")
+
+        return {'generated': generated, 'errors': errors, 'layouts_dir': str(layouts_dir)}
 
     def _print_summary(self, summary: Dict):
         """Print final summary."""

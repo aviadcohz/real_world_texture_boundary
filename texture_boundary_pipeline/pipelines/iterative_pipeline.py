@@ -5,6 +5,8 @@ import torch
 import json
 import shutil
 from PIL import Image
+import numpy as np
+import cv2
 
 from models import BaseVLM
 from core import (
@@ -467,6 +469,62 @@ class IterativePipeline:
 
         return summary
 
+    def _generate_layouts(self, crops_dir: Path, masks_dir: Path, layouts_dir: Path, alpha: float = 0.5) -> Dict:
+        """Generate layout images: crop with mask boundary emphasized in green.
+
+        Produces a flat directory of layout images (no size subdirectories).
+        """
+        layouts_dir.mkdir(parents=True, exist_ok=True)
+
+        generated = 0
+        errors = 0
+
+        for category in ['tiny', 'small', 'medium', 'large', 'xlarge']:
+            category_crop_dir = crops_dir / category
+            category_mask_dir = masks_dir / category
+            if not category_crop_dir.exists() or not category_mask_dir.exists():
+                continue
+
+            for crop_path in sorted(category_crop_dir.glob("*.jpg")):
+                mask_filename = crop_path.stem + ".png"
+                mask_path = category_mask_dir / mask_filename
+                if not mask_path.exists():
+                    continue
+
+                try:
+                    crop = np.array(Image.open(crop_path).convert("RGB"))
+                    mask = np.array(Image.open(mask_path).convert("L"))
+
+                    kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3))
+                    mask = cv2.dilate(mask, kernel, iterations=2)
+
+                    if mask.shape[:2] != crop.shape[:2]:
+                        mask = cv2.resize(mask, (crop.shape[1], crop.shape[0]), interpolation=cv2.INTER_NEAREST)
+
+                    boundary = mask > 127
+                    overlay = crop.copy()
+                    overlay[boundary] = [0, 255, 0]
+
+                    result = crop.copy()
+                    result[boundary] = (
+                        (1 - alpha) * crop[boundary].astype(float) +
+                        alpha * overlay[boundary].astype(float)
+                    ).astype(np.uint8)
+
+                    out_path = layouts_dir / crop_path.name
+                    Image.fromarray(result).save(str(out_path), quality=90)
+                    generated += 1
+                except Exception as e:
+                    errors += 1
+                    if self.verbose:
+                        print(f"      Layout error for {crop_path.name}: {e}")
+
+        if self.verbose:
+            print(f"\n   ✅ Layouts generated: {generated} (errors: {errors})")
+            print(f"   📁 {layouts_dir}")
+
+        return {'generated': generated, 'errors': errors, 'layouts_dir': str(layouts_dir)}
+
     def run(
         self,
         image_paths: List[Union[str, Path]],
@@ -552,11 +610,28 @@ class IterativePipeline:
                     print(f"   Failed: {mask_filter_stats['failed']}")
                     print(f"   Pass rate: {mask_filter_stats['pass_rate']}%")
 
-                # STEP 3: Collect passed crops into dataset
+                # STEP 3: Generate layouts (crop with mask boundary in green)
+                if self.verbose:
+                    print("\n" + "="*70)
+                    print("STEP 3: GENERATING LAYOUTS")
+                    print("="*70)
+
+                layouts_dir = run_dir / "layouts"
+                layout_stats = self._generate_layouts(
+                    crops_dir=crops_dir,
+                    masks_dir=masks_dir,
+                    layouts_dir=layouts_dir
+                )
+                all_steps.append({
+                    'step': 'layout_generation',
+                    **layout_stats
+                })
+
+                # STEP 4: Collect passed crops into dataset
                 if self.collect_dataset and mask_filter_stats['passed'] > 0:
                     if self.verbose:
                         print("\n" + "="*70)
-                        print("STEP 3: COLLECT DATASET")
+                        print("STEP 4: COLLECT DATASET")
                         print("="*70)
 
                     dataset_stats = self.collect_dataset_from_results(
@@ -607,6 +682,7 @@ class IterativePipeline:
             print(f"    crops/          - All extracted crops")
             print(f"    masks/          - Boundary masks")
             print(f"    masks_textures/ - Texture A & B masks (with _mask_a, _mask_b suffix)")
+            print(f"    layouts/        - Crops with mask boundary overlay (green)")
             print(f"    filter/         - Entropy filter results")
             print(f"    visualizations/ - Bbox visualizations")
             if 'dataset_dir' in summary:
