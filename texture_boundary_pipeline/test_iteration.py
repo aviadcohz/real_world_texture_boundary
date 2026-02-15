@@ -13,12 +13,12 @@ print("="*70)
 
 results = run_iterative_pipeline(
     model=model,
-    image_dir='/datasets/google_landmarks_v2/train_subset/images/',
-    output_dir="debug_masks",
+    image_dir='/home/aviad/RWTD/images/',
+    output_dir="RWTD_iterative_results_full/",
     dataset_base_dir='/datasets/debug/',
     entropy_threshold=3.5,  # Minimum entropy for both texture regions
     extract_masks=True,
-    num_images=10,
+    num_images=None,
     verbose=True
 )
 
