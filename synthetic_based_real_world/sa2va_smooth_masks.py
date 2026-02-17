@@ -23,15 +23,24 @@ sys.path.insert(0, str(Path("/home/aviad/real_world_texture_boundary/texture_bou
 from models.sa2va_vlm import Sa2VAModel
 from core.sa2va_boundaries import extract_morphological_boundary
 
-DATA_ROOT = Path("/datasets/google_landmarks_v2_scale/real_world_texture_boundary/results/controlnet_data_for_training")
-OUTPUT_DIR = Path("/home/aviad/real_world_texture_boundary/sytatic_based_real_world/sa2va_comparison")
-TRAINING_JSON = DATA_ROOT / "training_pairs.json"
+DATA_ROOT = Path("/datasets/synthatic_dataset/run_17_02/")
+OUTPUT_DIR = Path("/datasets/synthatic_dataset/run_17_02/sa2va_smooth_masks_output/")
+# Supports both formats:
+#   - "training_pairs.json": [{"image": "...", "text": "..."}]
+#   - "metadata.json":       {"samples": [{"image": "images/0000.png", "prompt": "..."}]}
+DESCRIPTIONS_JSON = DATA_ROOT / "metadata.json"
 
 
 def load_descriptions():
-    with open(TRAINING_JSON) as f:
-        pairs = json.load(f)
-    return {Path(p["image"]).stem: p["text"] for p in pairs}
+    with open(DESCRIPTIONS_JSON) as f:
+        data = json.load(f)
+
+    # metadata.json format (from run_inference.py)
+    if isinstance(data, dict) and "samples" in data:
+        return {Path(p["image"]).stem: p["prompt"] for p in data["samples"]}
+
+    # training_pairs.json format (original pipeline)
+    return {Path(p["image"]).stem: p["text"] for p in data}
 
 
 def parse_description(desc):
@@ -221,7 +230,10 @@ def smooth_mask_boundary(mask, smoothing=0.005, n_pts=600):
 # ── Pipeline per image ────────────────────────────────────────────────────────
 
 def run_pipeline(sa2va_model, stem, desc):
+    # Support both .jpg and .png image formats
     img_path = DATA_ROOT / "images" / f"{stem}.jpg"
+    if not img_path.exists():
+        img_path = DATA_ROOT / "images" / f"{stem}.png"
     mask_path = DATA_ROOT / "masks" / f"{stem}.png"
     if not img_path.exists() or not mask_path.exists():
         print(f"  SKIP: missing files for {stem}")
@@ -287,7 +299,10 @@ def visualize(result):
     Row 2  (Smoothed): smooth_a | smooth_b | smooth boundary | overlay
     """
     stem = result["stem"]
-    img = cv2.imread(str(DATA_ROOT / "images" / f"{stem}.jpg"))
+    img_path = DATA_ROOT / "images" / f"{stem}.jpg"
+    if not img_path.exists():
+        img_path = DATA_ROOT / "images" / f"{stem}.png"
+    img = cv2.imread(str(img_path))
     img_rgb = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
 
     fig, axes = plt.subplots(3, 4, figsize=(24, 18))
@@ -340,10 +355,10 @@ def visualize(result):
 
 def main():
     default_stems = [
-        "0000ae056149919f_0_228_778_578",
-        "0000e69998d37a98_168_138_353_278",
-        "000d59f6199efc33_238_0_608_455",
-        "000db83105d64f5d_0_268_338_328",
+        "0241",  # rough brick to dry grass texture
+        "0067",  # rough stone to grass texture
+        "0576",  # rough stone wall to smooth snow surface
+        "0715",  # bark texture to leaf surface
     ]
     stems = sys.argv[1:] if len(sys.argv) > 1 else default_stems
 

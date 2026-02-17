@@ -111,6 +111,13 @@ def parse_args():
         action="store_true",
         help="Skip overlay generation after mask generation",
     )
+    parser.add_argument(
+        "--output-json",
+        type=str,
+        default=None,
+        help="Name of output JSON file (default: metadata_sa2va_masks.json for metadata.json, "
+             "in-place update for training_pairs.json)",
+    )
     return parser.parse_args()
 
 
@@ -141,27 +148,54 @@ def setup_logging(log_dir):
 # ── Dataset validation ───────────────────────────────────────────────────────
 
 def validate_dataset(dataset_root):
-    """Validate dataset structure and return parsed training pairs."""
+    """Validate dataset structure and return parsed training pairs.
+
+    Supports two JSON formats:
+      - training_pairs.json: [{"image": "<abs>", "conditioning_image": "<abs>", "text": "..."}]
+      - metadata.json:       {"samples": [{"image": "images/0000.png", "mask": "masks/0000.png", "prompt": "..."}]}
+    """
     images_dir = dataset_root / "images"
     masks_dir = dataset_root / "masks"
-    json_path = dataset_root / "training_pairs.json"
 
-    for p, name in [
-        (images_dir, "images/"),
-        (masks_dir, "masks/"),
-        (json_path, "training_pairs.json"),
-    ]:
+    for p, name in [(images_dir, "images/"), (masks_dir, "masks/")]:
         if not p.exists():
             raise FileNotFoundError(f"Required path not found: {p}")
 
-    with open(json_path) as f:
-        training_pairs = json.load(f)
-
-    if not isinstance(training_pairs, list) or len(training_pairs) == 0:
-        raise ValueError(
-            f"training_pairs.json must be a non-empty list, "
-            f"got {type(training_pairs).__name__} with {len(training_pairs)} entries"
+    # Try training_pairs.json first, then metadata.json
+    json_path = dataset_root / "training_pairs.json"
+    if not json_path.exists():
+        json_path = dataset_root / "metadata.json"
+    if not json_path.exists():
+        raise FileNotFoundError(
+            f"No training_pairs.json or metadata.json found in {dataset_root}"
         )
+
+    with open(json_path) as f:
+        data = json.load(f)
+
+    # Normalize to common format: [{"image": abs, "conditioning_image": abs, "text": str}]
+    if isinstance(data, dict) and "samples" in data:
+        # metadata.json format — paths are relative to dataset_root
+        training_pairs = []
+        for s in data["samples"]:
+            img_path = Path(s["image"])
+            if not img_path.is_absolute():
+                img_path = dataset_root / img_path
+            mask_path = Path(s.get("mask", s.get("conditioning_image", "")))
+            if not mask_path.is_absolute():
+                mask_path = dataset_root / mask_path
+            training_pairs.append({
+                "image": str(img_path),
+                "conditioning_image": str(mask_path),
+                "text": s.get("prompt", s.get("text", "")),
+            })
+    elif isinstance(data, list):
+        training_pairs = data
+    else:
+        raise ValueError(f"Unrecognized JSON format in {json_path}")
+
+    if len(training_pairs) == 0:
+        raise ValueError(f"No entries found in {json_path}")
 
     required_keys = {"image", "conditioning_image", "text"}
     missing = required_keys - set(training_pairs[0].keys())
@@ -318,48 +352,74 @@ def process_dataset(training_pairs, output_dir, sa2va_model,
 
 # ── JSON update ──────────────────────────────────────────────────────────────
 
-def update_training_json(dataset_root, output_dir, logger):
-    """Backup original JSON, write updated version with new mask paths.
+def update_training_json(dataset_root, output_dir, logger, output_json_name=None):
+    """Write updated JSON with new mask paths.
 
-    Entries with a generated mask → point to masks_for_train/.
-    Entries without (errors) → keep original mask path.
+    For training_pairs.json: backup original, update in-place.
+    For metadata.json: write a new file (default: metadata_sa2va_masks.json).
     """
-    json_path = dataset_root / "training_pairs.json"
+    # Detect source format
+    orig_json = dataset_root / "training_pairs.json"
+    is_metadata = False
+    if not orig_json.exists():
+        orig_json = dataset_root / "metadata.json"
+        is_metadata = True
 
-    # Backup
-    bak_path = json_path.with_suffix(".json.bak")
-    if bak_path.exists():
-        ts = datetime.now().strftime("%Y%m%d_%H%M%S")
-        bak_path = json_path.with_name(f"training_pairs.json.bak.{ts}")
-    shutil.copy2(json_path, bak_path)
-    logger.info(f"Backed up original JSON → {bak_path}")
+    with open(orig_json) as f:
+        data = json.load(f)
 
-    # Re-read fresh (don't rely on in-memory state)
-    with open(json_path) as f:
-        pairs = json.load(f)
+    if is_metadata:
+        # metadata.json format — write a NEW json, don't overwrite original
+        out_json = dataset_root / (output_json_name or "metadata_sa2va_masks.json")
+        samples = data["samples"]
+        updated = 0
+        for entry in samples:
+            img_path = Path(entry["image"])
+            if not img_path.is_absolute():
+                img_path = dataset_root / img_path
+            stem = img_path.stem
+            new_mask = output_dir / f"{stem}.png"
+            if new_mask.exists() and new_mask.stat().st_size > 0:
+                entry["sa2va_mask"] = str(new_mask)
+                updated += 1
 
-    updated = 0
-    kept = 0
-    for entry in pairs:
-        stem = Path(entry["image"]).stem
-        new_mask = output_dir / f"{stem}.png"
-        if new_mask.exists() and new_mask.stat().st_size > 0:
-            entry["conditioning_image"] = str(new_mask)
-            updated += 1
-        else:
-            kept += 1
+        with open(out_json, "w") as f:
+            json.dump(data, f, indent=2)
+        logger.info(f"Updated {updated} entries with sa2va_mask field")
+        logger.info(f"Written to: {out_json}")
+        return out_json
 
-    with open(json_path, "w") as f:
-        json.dump(pairs, f, indent=2)
+    else:
+        # training_pairs.json format — backup and update in-place
+        bak_path = orig_json.with_suffix(".json.bak")
+        if bak_path.exists():
+            ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+            bak_path = orig_json.with_name(f"training_pairs.json.bak.{ts}")
+        shutil.copy2(orig_json, bak_path)
+        logger.info(f"Backed up original JSON → {bak_path}")
 
-    # Verify
-    with open(json_path) as f:
-        verify = json.load(f)
-    assert len(verify) == len(pairs), "JSON verification failed"
+        pairs = data
+        updated = 0
+        kept = 0
+        for entry in pairs:
+            stem = Path(entry["image"]).stem
+            new_mask = output_dir / f"{stem}.png"
+            if new_mask.exists() and new_mask.stat().st_size > 0:
+                entry["conditioning_image"] = str(new_mask)
+                updated += 1
+            else:
+                kept += 1
 
-    logger.info(f"Updated {updated} entries, kept {kept} original paths")
-    logger.info(f"Written to: {json_path}")
-    return bak_path
+        with open(orig_json, "w") as f:
+            json.dump(pairs, f, indent=2)
+
+        with open(orig_json) as f:
+            verify = json.load(f)
+        assert len(verify) == len(pairs), "JSON verification failed"
+
+        logger.info(f"Updated {updated} entries, kept {kept} original paths")
+        logger.info(f"Written to: {orig_json}")
+        return bak_path
 
 
 # ── Summary ──────────────────────────────────────────────────────────────────
@@ -489,7 +549,7 @@ def main():
 
     # Update JSON
     if not args.skip_json_update and results["success"] > 0:
-        update_training_json(dataset_root, output_dir, logger)
+        update_training_json(dataset_root, output_dir, logger, args.output_json)
     elif args.skip_json_update:
         logger.info("JSON update skipped (--skip-json-update)")
     else:
