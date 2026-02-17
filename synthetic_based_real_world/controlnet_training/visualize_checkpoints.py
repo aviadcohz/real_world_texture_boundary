@@ -41,7 +41,7 @@ INFERENCE_STEPS = 30      # diffusion steps for generation
 SEED = 42                 # fixed seed for reproducible results
 DEVICE = "auto"           # "auto" (tries GPU, falls back CPU), "cuda", or "cpu"
 WATCH_MODE = False        # True = keep polling for new checkpoints every 5 min
-EPOCHS = [5, 40, 60]             # None = all checkpoints, or e.g. [5, 10, 25, 50] for specific ones
+EPOCHS = [80, 90, 100]             # None = all checkpoints, or e.g. [5, 10, 25, 50] for specific ones
 
 # ═══════════════════════════════════════════════════════════════════════════════
 
