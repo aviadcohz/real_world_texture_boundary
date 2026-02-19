@@ -448,9 +448,15 @@ def print_summary(results, logger):
 # ── Overlay generation ────────────────────────────────────────────────────────
 
 def generate_overlays(training_pairs, mask_dir, overlay_dir, logger,
-                      color=(0, 255, 0), alpha=0.7):
-    """Generate overlay images: boundary masks drawn on source images."""
+                      color=(0, 255, 0), alpha=0.85, dilate_px=6):
+    """Generate overlay images: boundary masks drawn on source images.
+
+    The boundary mask is dilated to make lines thick and clearly visible.
+    """
     overlay_dir.mkdir(parents=True, exist_ok=True)
+    kernel = cv2.getStructuringElement(
+        cv2.MORPH_ELLIPSE, (2 * dilate_px + 1, 2 * dilate_px + 1)
+    )
 
     done = 0
     skipped = 0
@@ -475,7 +481,9 @@ def generate_overlays(training_pairs, mask_dir, overlay_dir, logger,
             errors += 1
             continue
 
-        boundary = mask > 127
+        # Dilate boundary for visibility
+        thick_mask = cv2.dilate((mask > 127).astype(np.uint8), kernel)
+        boundary = thick_mask > 0
         out = img.copy()
         if boundary.any():
             out[boundary] = (
@@ -517,43 +525,58 @@ def main():
         logger.info("DRY RUN — exiting without processing")
         return
 
-    # Load model
-    logger.info("Loading SA2VA model...")
-    t_load = time.time()
-    sa2va_model = Sa2VAModel(device="cuda", lazy_load=True)
-    logger.info(f"SA2VA model ready ({time.time() - t_load:.1f}s)")
+    # Check if all masks already exist — skip SA2VA processing entirely
+    all_masks_exist = existing == len(training_pairs)
 
-    # Process
-    results = process_dataset(
-        training_pairs=training_pairs,
-        output_dir=output_dir,
-        sa2va_model=sa2va_model,
-        logger=logger,
-        log_every=args.log_every,
-        boundary_thickness=args.boundary_thickness,
-    )
-
-    # Unload model
-    sa2va_model.unload()
-    logger.info("SA2VA model unloaded")
-
-    # Summary
-    print_summary(results, logger)
-
-    # Save error manifest
-    if results["error_details"]:
-        error_path = output_dir / "errors.json"
-        with open(error_path, "w") as f:
-            json.dump(results["error_details"], f, indent=2)
-        logger.info(f"Error manifest: {error_path}")
-
-    # Update JSON
-    if not args.skip_json_update and results["success"] > 0:
-        update_training_json(dataset_root, output_dir, logger, args.output_json)
-    elif args.skip_json_update:
-        logger.info("JSON update skipped (--skip-json-update)")
+    if all_masks_exist:
+        logger.info("All masks already exist — skipping SA2VA processing")
     else:
-        logger.warning("JSON update skipped: no successful generations")
+        # Load model
+        logger.info("Loading SA2VA model...")
+        t_load = time.time()
+        sa2va_model = Sa2VAModel(device="cuda", lazy_load=True)
+        logger.info(f"SA2VA model ready ({time.time() - t_load:.1f}s)")
+
+        # Process
+        results = process_dataset(
+            training_pairs=training_pairs,
+            output_dir=output_dir,
+            sa2va_model=sa2va_model,
+            logger=logger,
+            log_every=args.log_every,
+            boundary_thickness=args.boundary_thickness,
+        )
+
+        # Unload model
+        sa2va_model.unload()
+        logger.info("SA2VA model unloaded")
+
+        # Summary
+        print_summary(results, logger)
+
+        # Save error manifest
+        if results["error_details"]:
+            error_path = output_dir / "errors.json"
+            with open(error_path, "w") as f:
+                json.dump(results["error_details"], f, indent=2)
+            logger.info(f"Error manifest: {error_path}")
+
+        # Update JSON
+        if not args.skip_json_update and results["success"] > 0:
+            update_training_json(dataset_root, output_dir, logger, args.output_json)
+        elif args.skip_json_update:
+            logger.info("JSON update skipped (--skip-json-update)")
+        else:
+            logger.warning("JSON update skipped: no successful generations")
+
+    # Check if output JSON already exists — skip update if so
+    if all_masks_exist and not args.skip_json_update:
+        out_json_name = args.output_json or "metadata_sa2va_masks.json"
+        out_json_path = dataset_root / out_json_name
+        if out_json_path.exists():
+            logger.info(f"Output JSON already exists — skipping: {out_json_path}")
+        else:
+            update_training_json(dataset_root, output_dir, logger, args.output_json)
 
     # Generate overlays for visual debugging
     if not args.no_overlays:
