@@ -64,6 +64,11 @@ from .mask_refinement import (
     refine_masks_and_extract_boundary
 )
 
+# Oracle points
+from .oracle_points import (
+    sample_oracle_points,
+)
+
 __all__ = [
     # Grounding
     'ground_single_image',
@@ -114,4 +119,7 @@ __all__ = [
     # Mask refinement
     'MaskRefinementPipeline',
     'refine_masks_and_extract_boundary',
+
+    # Oracle points
+    'sample_oracle_points',
 ]

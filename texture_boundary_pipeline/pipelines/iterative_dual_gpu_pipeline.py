@@ -23,6 +23,7 @@ from core import (
     extract_morphological_boundary,
     compute_region_entropy,
     refine_masks_and_extract_boundary,
+    sample_oracle_points,
     process_bboxes,
     visualize_all_images,
     extract_all_crops,
@@ -251,12 +252,16 @@ class IterativeDualGPUPipeline:
                 masks_dir = self.run_dir / "masks"
                 filter_dir = self.run_dir / "filter"
 
+                # (also populates oracle_points in processed_data in-place)
                 mask_filter_stats = self._extract_masks_and_filter(
                     crops_dir=crops_dir,
                     processed_data=processed_data,
                     masks_dir=masks_dir,
                     filter_dir=filter_dir
                 )
+
+                # Save processed_bboxes.json with oracle_points added
+                save_json(processed_data, processed_file)
 
                 all_steps.append({
                     'step': 'mask_extraction_and_filter',
@@ -696,14 +701,33 @@ class IterativeDualGPUPipeline:
                 }
                 filter_results.append(result)
 
-                # Save mask
+                # Save boundary mask in masks/category/
                 mask_category_dir = masks_dir / category
                 mask_category_dir.mkdir(parents=True, exist_ok=True)
                 mask_filename = crop_name.replace('.jpg', '.png').replace('.jpeg', '.png')
                 mask_path = mask_category_dir / mask_filename
                 Image.fromarray(boundary).save(mask_path)
 
+                # Save texture masks in masks_textures/category/
+                masks_textures_dir = masks_dir.parent / "masks_textures"
+                mask_textures_category_dir = masks_textures_dir / category
+                mask_textures_category_dir.mkdir(parents=True, exist_ok=True)
+
+                mask_a_filename = mask_filename.replace('.png', '_mask_a.png')
+                mask_a_path = mask_textures_category_dir / mask_a_filename
+                Image.fromarray(mask_a_to_save).save(mask_a_path)
+
+                mask_b_filename = mask_filename.replace('.png', '_mask_b.png')
+                mask_b_path = mask_textures_category_dir / mask_b_filename
+                Image.fromarray(mask_b_to_save).save(mask_b_path)
+
                 result['mask_path'] = str(mask_path)
+                result['mask_a_path'] = str(mask_a_path)
+                result['mask_b_path'] = str(mask_b_path)
+
+                # Sample oracle point prompts for SAM training
+                oracle_pts = sample_oracle_points(mask_a_to_save, mask_b_to_save, n_points=2)
+                result['oracle_points'] = oracle_pts
 
                 if passed:
                     passed_crops.append(result)
@@ -735,6 +759,13 @@ class IterativeDualGPUPipeline:
                 })
                 failed_crops.append({'crop_name': crop_name, 'error': str(e)})
 
+        # Propagate oracle_points back into processed_data (updated in-place for the caller)
+        oracle_lookup = {r['crop_name']: r.get('oracle_points') for r in filter_results}
+        for img_data in processed_data:
+            for box in img_data.get('boxes', []):
+                if 'crop_name' in box:
+                    box['oracle_points'] = oracle_lookup.get(box['crop_name'])
+
         # Save filter results JSON
         filter_json_path = filter_dir / "entropy_filter_results.json"
         save_json(filter_results, filter_json_path)
@@ -747,6 +778,7 @@ class IterativeDualGPUPipeline:
             'threshold': self.entropy_threshold,
             'pass_rate': round(len(passed_crops) / len(filter_results) * 100, 1) if filter_results else 0,
             'masks_dir': str(masks_dir),
+            'masks_textures_dir': str(masks_dir.parent / "masks_textures"),
             'filter_dir': str(filter_dir),
             'filter_json': str(filter_json_path)
         }

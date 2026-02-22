@@ -14,6 +14,7 @@ from core import (
     extract_morphological_boundary,
     compute_region_entropy,
     refine_masks_and_extract_boundary,
+    sample_oracle_points,
 )
 from utils import (
     list_images,
@@ -276,6 +277,10 @@ class IterativePipeline:
                 result['mask_a_path'] = str(mask_a_path)
                 result['mask_b_path'] = str(mask_b_path)
 
+                # Sample oracle point prompts for SAM training
+                oracle_pts = sample_oracle_points(mask_a_to_save, mask_b_to_save, n_points=2)
+                result['oracle_points'] = oracle_pts
+
                 if passed:
                     passed_crops.append(result)
                     # Copy crop to filter/passed folder
@@ -305,6 +310,13 @@ class IterativePipeline:
                     'passed': False
                 })
                 failed_crops.append({'crop_name': crop_name, 'error': str(e)})
+
+        # Propagate oracle_points back into processed_data (updated in-place for the caller)
+        oracle_lookup = {r['crop_name']: r.get('oracle_points') for r in filter_results}
+        for img_data in processed_data:
+            for box in img_data['boxes']:
+                if 'crop_name' in box:
+                    box['oracle_points'] = oracle_lookup.get(box['crop_name'])
 
         # Save filter results JSON
         filter_json_path = filter_dir / "entropy_filter_results.json"
@@ -591,12 +603,16 @@ class IterativePipeline:
                 filter_dir = run_dir / "filter"
 
                 # Extract masks and filter
+                # (also populates oracle_points in processed_data in-place)
                 mask_filter_stats = self.extract_masks_and_filter(
                     crops_dir=crops_dir,
                     processed_data=processed_data,
                     masks_dir=masks_dir,
                     filter_dir=filter_dir
                 )
+
+                # Save processed_bboxes.json with oracle_points added
+                save_json(processed_data, processed_file)
 
                 all_steps.append({
                     'step': 'mask_extraction_and_filter',
