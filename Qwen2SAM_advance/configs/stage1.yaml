@@ -1,0 +1,94 @@
+# Stage 1: General segmentation recovery with Qwen replacing CLIP
+#
+# Goal: Teach SAM3 to segment using Qwen2.5-VL embeddings instead of CLIP.
+# Data: COCO 2017 train (118K images, 860K instances, 80 categories)
+# Trainable: adapter (2.1M) + encoder (9.5M) + decoder (11.6M) + scoring + seg_head ≈ 35M
+# Frozen: ViT backbone (446M) + Qwen2.5-VL (3B)
+#
+# Expected VRAM: ~25GB (batch_size=1), ~40GB (batch_size=2)
+# Recommended: 96GB GPU, batch_size=2-4
+
+model:
+  qwen_model_name: "Qwen/Qwen2.5-VL-3B-Instruct"
+  qwen_dtype: "bfloat16"
+  freeze_qwen: true
+  use_lora: false
+  # LoRA config (used when use_lora=true, e.g., Stage 2)
+  lora_r: 16
+  lora_alpha: 32
+  # Cross-attention adapter
+  adapter_num_tokens: 32   # Match CLIP's context_length
+  adapter_num_layers: 2
+  adapter_num_heads: 8
+
+data:
+  # COCO 2017 — update these paths for your machine
+  annotation_file: "/data/coco/annotations/instances_train2017.json"
+  image_dir: "/data/coco/train2017"
+  # Validation set (COCO val2017)
+  val_annotation_file: "/data/coco/annotations/instances_val2017.json"
+  val_image_dir: "/data/coco/val2017"
+  resolution: 1008
+
+# Start with detection only (no masks) — faster, less memory
+# Set to true once detection loss is decreasing well
+enable_masks: false
+
+loss:
+  # Matcher costs
+  cost_class: 2.0
+  cost_bbox: 5.0
+  cost_giou: 2.0
+  # Classification
+  weight_ce: 20.0
+  pos_weight: 5.0
+  use_presence: true
+  presence_weight: 20.0
+  # Boxes
+  weight_bbox: 5.0
+  weight_giou: 2.0
+  # Masks (only when enable_masks=true)
+  weight_mask: 5.0
+  weight_dice: 1.0
+
+optimizer:
+  weight_decay: 0.05
+  # Per-component learning rates
+  lr_adapter: 1.0e-4     # Highest — needs to learn from scratch
+  lr_encoder: 8.0e-5     # Fusion encoder — relearning text integration
+  lr_decoder: 8.0e-5     # Decoder cross-attention to new text
+  lr_scoring: 8.0e-5     # DotProductScoring with new embeddings
+  lr_seg_head: 8.0e-5    # Segmentation head
+  lr_queries: 8.0e-5     # Object queries
+  lr_lora: 5.0e-6        # LoRA (if enabled)
+  lr_other: 8.0e-5       # Geometry encoder, etc.
+
+scheduler:
+  warmup_epochs: 5
+
+training:
+  epochs: 50
+  batch_size: 1           # Increase to 2-4 if VRAM allows
+  num_workers: 4
+  grad_clip: 0.1
+  log_interval: 100       # Console log every N steps
+  save_interval: 5        # Save checkpoint every N epochs
+  val_interval: 5         # Run validation every N epochs
+  val_max_batches: 200    # Max validation batches (subset of 5K val set)
+  visual_log_interval: 500  # Log prediction images to W&B every N steps
+  checkpoint_dir: "checkpoints/stage1"
+  resume_from: null       # Path to resume checkpoint
+
+# Weights & Biases configuration
+wandb:
+  enabled: true
+  project: "Qwen2SAM_advance"
+  run_name: null          # Auto-generated if null
+  group: "stage1"
+  tags: ["stage1", "segmentation-recovery"]
+
+# Visualization — fixed samples logged to W&B every visual_log_interval steps
+visualization:
+  n_train_samples: 4      # Number of fixed train images to track
+  n_val_samples: 4        # Number of fixed val images to track
+  cell_size: 256          # Grid cell size in pixels
