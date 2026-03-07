@@ -1,0 +1,49 @@
+{
+  "zero_shot": {
+    "tag": "zero_shot",
+    "num_samples": 227,
+    "mean_iou": 0.44823577498018197,
+    "mean_iou_a": 0.5009648037434684,
+    "mean_iou_b": 0.3955067462168957,
+    "mean_dice": 0.4829756975395863,
+    "mean_ari": 0.7339293509618947
+  },
+  "v3_detr_stage1": {
+    "tag": "v3_detr_stage1",
+    "num_samples": 227,
+    "mean_iou": 0.8274298704207651,
+    "mean_iou_a": 0.8482091199543237,
+    "mean_iou_b": 0.8066506208872066,
+    "mean_dice": 0.8887490277620466,
+    "mean_ari": 0.6934813543702374
+  },
+  "v3_tracker_stage2": {
+    "tag": "v3_tracker_stage2",
+    "num_samples": 227,
+    "mean_iou": 0.8645857186862388,
+    "mean_iou_a": 0.8786876458097449,
+    "mean_iou_b": 0.8504837915627327,
+    "mean_dice": 0.9087697284548631,
+    "mean_ari": 0.7632585804899908
+  },
+  "improvement_tracker_vs_zero_shot": {
+    "mean_iou": 0.4163499437060568,
+    "mean_dice": 0.42579403091527684,
+    "mean_ari": 0.029329229528096135
+  },
+  "improvement_tracker_vs_zero_shot_pct": {
+    "mean_iou": 92.89,
+    "mean_dice": 88.16,
+    "mean_ari": 4.0
+  },
+  "improvement_tracker_vs_detr": {
+    "mean_iou": 0.03715584826547369,
+    "mean_dice": 0.020020700692816584,
+    "mean_ari": 0.06977722611975345
+  },
+  "improvement_tracker_vs_detr_pct": {
+    "mean_iou": 4.49,
+    "mean_dice": 2.25,
+    "mean_ari": 10.06
+  }
+}
