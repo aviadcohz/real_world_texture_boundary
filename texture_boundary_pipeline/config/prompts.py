@@ -39,14 +39,24 @@ For each VALID texture transition, output a bounding box.
 
 Output format - JSON list:
 [
-  {"description": "texture_A to texture_B", "bbox": [x1, y1, x2, y2]}
+  {"description": "texture_A <TO> texture_B", "bbox": [x1, y1, x2, y2]}
 ]
 
+IMPORTANT: Use the exact separator " <TO> " (with spaces) between the two texture descriptions. Do NOT use the word "to" as separator.
+
 Description guidelines:
+- Each texture description MUST be 5-10 words with discriminative features
+- Include: material, pattern/structure, surface quality, distinguishing detail
+- Template: "[size/shape] [material] [structure pattern] [with key detail]"
 - Describe SURFACE PROPERTIES, not object names
-- BAD: "red mower to grass" (object-focused)
-- GOOD: "painted metal to grass texture" (texture-focused, but still avoid if it's clearly an object silhouette)
-- BEST: "grass to concrete", "wood grain to tile pattern"
+- BAD: "brick <TO> plaster" (too short, not discriminative)
+- BAD: "red mower <TO> grass" (object-focused)
+- BAD: "the smooth and shiny surface of the white plaster wall" (too long, article-heavy)
+- GOOD: "smooth flat plaster surface with fine grain <TO> rough red brick pattern with deep mortar lines"
+- GOOD: "fine woven fabric with visible thread crossings <TO> coarse weathered wood grain with raised texture"
+- GOOD: "dense green grass texture with short blades <TO> gray concrete pavement with rough aggregate"
+Pay attention the the Good and Bad it in terms of the description details and not the actual texturees. i don't want you to focus on those
+specific textures but rather on the level of detail and the focus on surface properties in the description.
 
 Box requirements:
 - Width: 50-200 pixels
@@ -62,9 +72,9 @@ Output ONLY the JSON list.
 
 Example:
 [
-  {"description": "smooth plaster to rough brick", "bbox": [50, 100, 200, 450]},
-  {"description": "wood grain to metal surface", "bbox": [250, 150, 400, 540]},
-  {"description": "grass texture to concrete pavement", "bbox": [500, 320, 650, 720]}
+  {"description": "smooth flat plaster surface with fine grain <TO> rough red brick pattern with deep mortar lines", "bbox": [50, 100, 200, 450]},
+  {"description": "natural wood grain with parallel dark lines <TO> brushed metal surface with fine striations", "bbox": [250, 150, 400, 540]},
+  {"description": "dense green grass texture with short blades <TO> gray concrete pavement with rough aggregate", "bbox": [500, 320, 650, 720]}
 ]"""
 
 

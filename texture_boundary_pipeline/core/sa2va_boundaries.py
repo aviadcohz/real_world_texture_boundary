@@ -8,33 +8,83 @@ from skimage.morphology import skeletonize, binary_erosion
 def parse_texture_description(description: str) -> Tuple[str, str]:
     """
     Parse texture description into two textures.
-    
+
     Args:
         description: e.g., "smooth grass to rough stone wall"
-    
+
     Returns:
         (texture_a, texture_b)
-    
+
     Examples:
         "smooth grass to rough stone wall" → ("smooth grass", "rough stone wall")
         "wood to metal" → ("wood", "metal")
     """
-    # Split by " to "
+    # Primary: split by " <TO> " (unambiguous separator from grounding prompt)
+    if ' <TO> ' in description:
+        parts = description.split(' <TO> ', 1)
+        return parts[0].strip(), parts[1].strip()
+
+    # Fallback: split by " to " (legacy format)
     parts = description.split(' to ')
-    
     if len(parts) == 2:
         return parts[0].strip(), parts[1].strip()
-    
+    elif len(parts) > 2:
+        # Multiple " to " — pick the most balanced split
+        best_split = 1
+        best_balance = float('inf')
+        for i in range(1, len(parts)):
+            left = ' to '.join(parts[:i])
+            right = ' to '.join(parts[i:])
+            balance = abs(len(left.split()) - len(right.split()))
+            if balance < best_balance:
+                best_balance = balance
+                best_split = i
+        left = ' to '.join(parts[:best_split])
+        right = ' to '.join(parts[best_split:])
+        return left.strip(), right.strip()
+
     # Try other separators
-    for sep in [' and ', ' vs ', ' with ', ' | ']:
+    for sep in [' and ', ' vs ', ' | ']:
         if sep in description:
             parts = description.split(sep, 1)
             return parts[0].strip(), parts[1].strip()
-    
+
     # Fallback: split in half
     words = description.split()
     mid = len(words) // 2
     return ' '.join(words[:mid]), ' '.join(words[mid:])
+
+
+def validate_texture_description(texture_a: str, texture_b: str,
+                                  min_words: int = 4, max_words: int = 12) -> Tuple[bool, str]:
+    """
+    Validate that texture descriptions meet length requirements for Qwen2SAM training.
+
+    Qwen2SAM v3 expects 5-10 word descriptions (8-13 BPE tokens, max 16).
+    We use a slightly wider range (4-12) to avoid discarding borderline cases.
+
+    Args:
+        texture_a: First texture description
+        texture_b: Second texture description
+        min_words: Minimum words per description (default 4)
+        max_words: Maximum words per description (default 12)
+
+    Returns:
+        (is_valid, reason) - True if both descriptions pass, reason if not
+    """
+    words_a = len(texture_a.split())
+    words_b = len(texture_b.split())
+
+    if words_a < min_words:
+        return False, f"texture_a too short ({words_a} words): '{texture_a}'"
+    if words_b < min_words:
+        return False, f"texture_b too short ({words_b} words): '{texture_b}'"
+    if words_a > max_words:
+        return False, f"texture_a too long ({words_a} words): '{texture_a}'"
+    if words_b > max_words:
+        return False, f"texture_b too long ({words_b} words): '{texture_b}'"
+
+    return True, "OK"
 
 
 def extract_morphological_boundary(

@@ -245,27 +245,25 @@ def _render_page(rows, page_num, output_dir, col_titles):
     return out_path
 
 
-# ── main ──────────────────────────────────────────────────────────────────────
+# ── loaders ───────────────────────────────────────────────────────────────────
 
-def visualize_oracle_points(run_dir: str | Path, page_size: int = PAGE_SIZE):
-    run_dir = Path(run_dir)
-    json_path = run_dir / "processed_bboxes.json"
+COL_TITLES = [
+    "Original + bbox + mapped pts",
+    "Crop 1024px (cyan=A | red=B)",
+    "Mask A",
+    "Mask B",
+    "Boundary mask",
+]
 
-    with open(json_path) as f:
+
+def _rows_from_run_dir(run_dir: Path) -> list[dict]:
+    """Load rows from a pipeline run directory (processed_bboxes.json, nested dirs)."""
+    with open(run_dir / "processed_bboxes.json") as f:
         data = json.load(f)
 
-    col_titles = [
-        "Original + bbox + mapped pts",
-        "Crop 1024px (cyan=A | red=B)",
-        "Mask A",
-        "Mask B",
-        "Boundary mask",
-    ]
-
-    # Cache original images so each source image is loaded only once
     orig_cache: dict[str, np.ndarray | None] = {}
-
     rows = []
+
     for img_entry in data:
         img_path = img_entry.get("image_path", "")
         if img_path not in orig_cache:
@@ -276,20 +274,73 @@ def visualize_oracle_points(run_dir: str | Path, page_size: int = PAGE_SIZE):
             category  = box["crop_category"]
             stem      = Path(crop_name).stem
 
-            crop_img   = _load     (run_dir / "crops"          / category / crop_name)
-            mask_a_img = _load_gray(run_dir / "masks_textures" / category / f"{stem}_mask_a.png")
-            mask_b_img = _load_gray(run_dir / "masks_textures" / category / f"{stem}_mask_b.png")
-            bnd_img    = _load_gray(run_dir / "masks"          / category / f"{stem}.png")
-
             rows.append({
                 "box":        box,
                 "orig_img":   orig_cache[img_path],
-                "crop_img":   crop_img,
-                "mask_a_img": mask_a_img,
-                "mask_b_img": mask_b_img,
-                "bnd_img":    bnd_img,
+                "crop_img":   _load     (run_dir / "crops"          / category / crop_name),
+                "mask_a_img": _load_gray(run_dir / "masks_textures" / category / f"{stem}_mask_a.png"),
+                "mask_b_img": _load_gray(run_dir / "masks_textures" / category / f"{stem}_mask_b.png"),
+                "bnd_img":    _load_gray(run_dir / "masks"          / category / f"{stem}.png"),
             })
 
+    return rows
+
+
+def _rows_from_metadata(dataset_dir: Path) -> list[dict]:
+    """
+    Load rows from a flat SAM dataset (metadata.json, flat dirs).
+    All paths in metadata.json are absolute — use them directly.
+    """
+    with open(dataset_dir / "metadata.json") as f:
+        records = json.load(f)
+
+    orig_cache: dict[str, np.ndarray | None] = {}
+    rows = []
+
+    for rec in records:
+        img_path = rec.get("image_path", "")
+        if img_path not in orig_cache:
+            orig_cache[img_path] = _load(Path(img_path))
+
+        # Re-use _render_page's expected "box" shape
+        box = {
+            "description":   rec.get("description", ""),
+            "coords":        rec.get("coords"),
+            "crop_name":     rec.get("crop_name", ""),
+            "crop_category": rec.get("crop_category", ""),
+            "oracle_points": rec.get("oracle_points"),
+        }
+
+        rows.append({
+            "box":        box,
+            "orig_img":   orig_cache[img_path],
+            "crop_img":   _load     (Path(rec["crop_path"])),
+            "mask_a_img": _load_gray(Path(rec["mask_a_path"])),
+            "mask_b_img": _load_gray(Path(rec["mask_b_path"])),
+            "bnd_img":    _load_gray(Path(rec["mask_path"])),
+        })
+
+    return rows
+
+
+# ── public API ─────────────────────────────────────────────────────────────────
+
+def visualize_oracle_points(run_dir: str | Path, page_size: int = PAGE_SIZE):
+    """Visualize from a pipeline run directory (processed_bboxes.json format)."""
+    run_dir = Path(run_dir)
+    rows = _rows_from_run_dir(run_dir)
+    return _paginate_and_save(rows, run_dir, page_size)
+
+
+def visualize_sam_dataset(dataset_dir: str | Path, page_size: int = PAGE_SIZE):
+    """Visualize from a flat SAM training dataset (metadata.json format)."""
+    dataset_dir = Path(dataset_dir)
+    rows = _rows_from_metadata(dataset_dir)
+    return _paginate_and_save(rows, dataset_dir, page_size)
+
+
+def _paginate_and_save(rows: list[dict], output_dir: Path,
+                       page_size: int) -> list[Path]:
     print(f"Total crops: {len(rows)}")
     with_pts = sum(1 for r in rows if r["box"].get("oracle_points"))
     print(f"  With oracle points   : {with_pts}")
@@ -297,15 +348,26 @@ def visualize_oracle_points(run_dir: str | Path, page_size: int = PAGE_SIZE):
 
     saved = []
     for page_num, start in enumerate(range(0, len(rows), page_size), start=1):
-        page_rows = rows[start: start + page_size]
-        out = _render_page(page_rows, page_num, run_dir, col_titles)
+        out = _render_page(rows[start: start + page_size],
+                           page_num, output_dir, COL_TITLES)
         saved.append(out)
 
-    print(f"\nDone — {len(saved)} page(s) saved to {run_dir}")
+    print(f"\nDone — {len(saved)} page(s) saved to {output_dir}")
     return saved
 
 
+# ── entry point ────────────────────────────────────────────────────────────────
+
 if __name__ == "__main__":
-    default_run = "/home/aviad/results/debug_for_training/run_20260222_140936"
-    run_dir = sys.argv[1] if len(sys.argv) > 1 else default_run
-    visualize_oracle_points(run_dir)
+    default_path = "/home/aviad/results/sam_training_debug"
+    target = Path(sys.argv[1] if len(sys.argv) > 1 else default_path)
+
+    if (target / "metadata.json").exists():
+        print(f"Detected flat SAM dataset — using metadata.json")
+        visualize_sam_dataset(target)
+    elif (target / "processed_bboxes.json").exists():
+        print(f"Detected pipeline run directory — using processed_bboxes.json")
+        visualize_oracle_points(target)
+    else:
+        print(f"ERROR: neither metadata.json nor processed_bboxes.json found in {target}")
+        sys.exit(1)

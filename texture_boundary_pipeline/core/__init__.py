@@ -45,6 +45,7 @@ from .classification import (
 # Sa2VA boundaries
 from .sa2va_boundaries import (
     parse_texture_description,
+    validate_texture_description,
     extract_morphological_boundary,
     extract_sa2va_boundary,
     extract_sa2va_boundaries_batch
@@ -106,6 +107,7 @@ __all__ = [
     
     # Sa2VA boundaries
     'parse_texture_description',
+    'validate_texture_description',
     'extract_morphological_boundary',
     'extract_sa2va_boundary',
     'extract_sa2va_boundaries_batch',

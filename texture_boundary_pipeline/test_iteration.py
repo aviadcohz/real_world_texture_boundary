@@ -14,12 +14,13 @@ print("="*70)
 results = run_iterative_pipeline(
     model=model,
     image_dir='/datasets/google_landmarks_v2/train_subset/images/',
-    output_dir="results/debug_for_training",
-    dataset_base_dir='/datasets/debug/',
+    output_dir="/home/aviad/check_for_training",
+    dataset_base_dir='/datasets/google_landmarks_v2/training_qwen2sam/',
     entropy_threshold=3.5,  # Minimum entropy for both texture regions
     extract_masks=True,
     num_images=5,
-    verbose=True
+    verbose=True,
+    crop_categories=['medium', 'large', 'xlarge'],
 )
 
 print(f"📁 Results saved to: {results['output_dir']}")

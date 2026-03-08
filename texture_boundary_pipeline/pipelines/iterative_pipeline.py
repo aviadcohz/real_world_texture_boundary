@@ -48,6 +48,7 @@ class IterativePipeline:
         refinement_min_object_size: int = 100,
         refinement_closing_kernel_size: int = 7,
         refinement_gaussian_sigma: float = 3.0,
+        crop_categories: List[str] = None,
         **basic_pipeline_kwargs
     ):
         """
@@ -65,6 +66,7 @@ class IterativePipeline:
             refinement_min_object_size: Min object size for refinement (default 100)
             refinement_closing_kernel_size: Kernel size for morphological closing (default 7)
             refinement_gaussian_sigma: Sigma for Gaussian blur smoothing (default 3.0)
+            crop_categories: List of size categories to process (default: all)
             **basic_pipeline_kwargs: Arguments for BasicPipeline
         """
         self.model = model
@@ -76,6 +78,9 @@ class IterativePipeline:
         self.collect_dataset = collect_dataset
         self.dataset_base_dir = Path(dataset_base_dir)
         
+        # Crop category filter
+        self.crop_categories = crop_categories or ['tiny', 'small', 'medium', 'large', 'xlarge']
+
         # Mask refinement settings
         self.refine_masks = refine_masks
         self.refinement_min_object_size = refinement_min_object_size
@@ -162,7 +167,7 @@ class IterativePipeline:
 
         # Get all crops
         all_crops = []
-        for category in ['tiny', 'small', 'medium', 'large', 'xlarge']:
+        for category in self.crop_categories:
             category_dir = crops_dir / category
             if category_dir.exists():
                 crops = list(category_dir.glob("*.jpg")) + list(category_dir.glob("*.png"))
@@ -390,7 +395,7 @@ class IterativePipeline:
         skipped_masks_a = 0
         skipped_masks_b = 0
 
-        for category in ['tiny', 'small', 'medium', 'large', 'xlarge']:
+        for category in self.crop_categories:
             category_dir = passed_dir / category
             if not category_dir.exists():
                 continue
@@ -491,7 +496,7 @@ class IterativePipeline:
         generated = 0
         errors = 0
 
-        for category in ['tiny', 'small', 'medium', 'large', 'xlarge']:
+        for category in self.crop_categories:
             category_crop_dir = crops_dir / category
             category_mask_dir = masks_dir / category
             if not category_crop_dir.exists() or not category_mask_dir.exists():
@@ -723,6 +728,7 @@ def run_iterative_pipeline(
     refinement_min_object_size: int = 100,
     refinement_closing_kernel_size: int = 7,
     refinement_gaussian_sigma: float = 3.0,
+    crop_categories: List[str] = None,
     **kwargs
 ) -> Dict:
     """
@@ -741,6 +747,7 @@ def run_iterative_pipeline(
         refinement_min_object_size: Min object size for refinement (default 100)
         refinement_closing_kernel_size: Kernel size for morphological closing (default 7)
         refinement_gaussian_sigma: Sigma for Gaussian blur smoothing (default 3.0)
+        crop_categories: List of size categories to process (default: all)
         **kwargs: Additional pipeline arguments
 
     Returns:
@@ -765,6 +772,7 @@ def run_iterative_pipeline(
         refinement_min_object_size=refinement_min_object_size,
         refinement_closing_kernel_size=refinement_closing_kernel_size,
         refinement_gaussian_sigma=refinement_gaussian_sigma,
+        crop_categories=crop_categories,
         **kwargs
     )
     return pipeline.run(images)

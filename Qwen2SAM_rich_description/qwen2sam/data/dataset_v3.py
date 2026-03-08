@@ -112,18 +112,21 @@ class V3Dataset(Dataset):
         mask_b_sam = resize_mask(full_mask_b, self.image_size, self.image_size)
 
         # ---- Augmentation ---------------------------------------------- #
+        # Always resize to image_size for Qwen spatial consistency.
+        # Qwen2.5-VL tiles images based on dimensions — different sizes
+        # produce different visual token layouts, breaking spatial features
+        # used by CoordHead (Stage 2 point regression).
+        image_resized = cv2.resize(image_np, (self.image_size, self.image_size),
+                                    interpolation=cv2.INTER_LINEAR)
         if self.augment:
-            image_resized = cv2.resize(image_np, (self.image_size, self.image_size),
-                                        interpolation=cv2.INTER_LINEAR)
             image_resized, mask_a_sam, mask_b_sam = augment_image_and_masks(
                 image_resized, mask_a_sam, mask_b_sam
             )
             mask_a_sam = (mask_a_sam > 0.5).astype(np.float32)
             mask_b_sam = (mask_b_sam > 0.5).astype(np.float32)
-            image_pil = Image.fromarray(image_resized)
-            sam_image = preprocess_image_for_sam3(image_resized, self.image_size)
-        else:
-            sam_image = preprocess_image_for_sam3(image_np, self.image_size)
+
+        image_pil = Image.fromarray(image_resized)
+        sam_image = preprocess_image_for_sam3(image_resized, self.image_size)
 
         # ---- GT bounding box ------------------------------------------- #
         gt_box_cxcywh, gt_box_xyxy = _mask_to_box(
