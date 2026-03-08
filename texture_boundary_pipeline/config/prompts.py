@@ -59,8 +59,8 @@ Pay attention the the Good and Bad it in terms of the description details and no
 specific textures but rather on the level of detail and the focus on surface properties in the description.
 
 Box requirements:
-- Width: 50-200 pixels
-- Height: covers the boundary extent
+- MINIMUM SIZE: Each bbox must be at least 128 pixels in both width AND height. Do NOT output small or tiny bboxes.
+- Typical size: 150-400 pixels per side. Make sure each box captures enough context around the transition.
 - Keep 50-80 pixel margin from image edges when possible
 - Maximum 8 bboxes
 - Complete bbox format: [x1, y1, x2, y2]
@@ -72,9 +72,9 @@ Output ONLY the JSON list.
 
 Example:
 [
-  {"description": "smooth flat plaster surface with fine grain <TO> rough red brick pattern with deep mortar lines", "bbox": [50, 100, 200, 450]},
-  {"description": "natural wood grain with parallel dark lines <TO> brushed metal surface with fine striations", "bbox": [250, 150, 400, 540]},
-  {"description": "dense green grass texture with short blades <TO> gray concrete pavement with rough aggregate", "bbox": [500, 320, 650, 720]}
+  {"description": "smooth flat plaster surface with fine grain <TO> rough red brick pattern with deep mortar lines", "bbox": [50, 100, 280, 450]},
+  {"description": "natural wood grain with parallel dark lines <TO> brushed metal surface with fine striations", "bbox": [250, 150, 500, 540]},
+  {"description": "dense green grass texture with short blades <TO> gray concrete pavement with rough aggregate", "bbox": [400, 300, 650, 520]}
 ]"""
 
 
