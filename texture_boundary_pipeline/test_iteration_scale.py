@@ -27,15 +27,18 @@ num_images = None
 results = run_iterative_dual_gpu_pipeline(
     local_model=model,
     remote_url=REMOTE_URL,
-    image_dir='/home/aviad/RWTD/images',
-    output_dir="/home/aviad/RWTD_for_training",
+    image_dir='/datasets/google_landmarks_v2/train_subset/images/',
+    output_dir="/home/aviad/training_data_qwen2sam",
     local_ratio=0.3,              # 100% local, 0% remote (adjust for your needs)
     local_batch_size=4,           # Your local GPU batch size
     remote_batch_size=12,         # H100 can handle larger batches
     num_images=num_images,
     extract_masks=True,
-    entropy_threshold=1,
-    verbose=True
+    entropy_threshold=4.5,
+    verbose=True,
+    crop_categories=['medium', 'large', 'xlarge'],
+    collect_dataset=True,
+    dataset_base_dir='/datasets/google_landmarks_v2/training_qwen2sam/',
 )
 
 print(f"\n📁 Results saved to: {results['output_dir']}")

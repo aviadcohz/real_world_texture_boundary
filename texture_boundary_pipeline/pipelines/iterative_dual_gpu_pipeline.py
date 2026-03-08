@@ -9,6 +9,7 @@ Workflow:
 
 from pathlib import Path
 from typing import List, Dict, Union
+from datetime import datetime
 import torch
 import json
 import shutil
@@ -72,6 +73,9 @@ class IterativeDualGPUPipeline:
         refinement_min_object_size: int = 100,
         refinement_closing_kernel_size: int = 7,
         refinement_gaussian_sigma: float = 3.0,
+        crop_categories: List[str] = None,
+        collect_dataset: bool = True,
+        dataset_base_dir: Union[str, Path] = "/datasets/ade20k",
         verbose: bool = True
     ):
         """
@@ -94,6 +98,9 @@ class IterativeDualGPUPipeline:
             refinement_min_object_size: Min object size for refinement (default 100)
             refinement_closing_kernel_size: Kernel size for morphological closing (default 7)
             refinement_gaussian_sigma: Sigma for Gaussian blur smoothing (default 3.0)
+            crop_categories: List of size categories to process (default: all)
+            collect_dataset: Whether to collect passed crops into a dataset
+            dataset_base_dir: Base directory for dataset collection
             verbose: Print progress
         """
         self.local_model = local_model
@@ -114,6 +121,13 @@ class IterativeDualGPUPipeline:
         self.target_size = target_size
         self.verbose = verbose
         
+        # Crop category filter
+        self.crop_categories = crop_categories or ['tiny', 'small', 'medium', 'large', 'xlarge']
+
+        # Dataset collection
+        self.collect_dataset = collect_dataset
+        self.dataset_base_dir = Path(dataset_base_dir)
+
         # Mask refinement settings
         self.refine_masks = refine_masks
         self.refinement_min_object_size = refinement_min_object_size
@@ -292,6 +306,31 @@ class IterativeDualGPUPipeline:
                     **layout_stats
                 })
 
+                # STEP 7: Collect passed crops into dataset
+                if self.collect_dataset and mask_filter_stats['passed'] > 0:
+                    if self.verbose:
+                        print("\n" + "="*70)
+                        print("STEP 7: COLLECT DATASET")
+                        print("="*70)
+
+                    dataset_stats = self.collect_dataset_from_results(
+                        filter_dir=filter_dir,
+                        masks_dir=masks_dir
+                    )
+
+                    all_steps.append({
+                        'step': 'collect_dataset',
+                        **dataset_stats
+                    })
+
+                    if self.verbose:
+                        print(f"\n   ✅ Dataset collection complete")
+                        print(f"   Images collected: {dataset_stats['collected_images']}")
+                        print(f"   Boundary masks collected: {dataset_stats['collected_masks']}")
+                        print(f"   Texture A masks collected: {dataset_stats['collected_masks_a']}")
+                        print(f"   Texture B masks collected: {dataset_stats['collected_masks_b']}")
+                        print(f"   Dataset: {dataset_stats['dataset_dir']}")
+
         # Final summary
         total_time = time.time() - start_time
         summary = {
@@ -322,6 +361,12 @@ class IterativeDualGPUPipeline:
             'steps': all_steps,
             'output_dir': str(self.run_dir)
         }
+
+        # Add dataset info if collected
+        for step in all_steps:
+            if step.get('step') == 'collect_dataset':
+                summary['dataset_dir'] = step['dataset_dir']
+                break
 
         summary_file = self.run_dir / "pipeline_summary.json"
         save_json(summary, summary_file)
@@ -613,7 +658,7 @@ class IterativeDualGPUPipeline:
 
         # Get all crops
         all_crops = []
-        for category in ['tiny', 'small', 'medium', 'large', 'xlarge']:
+        for category in self.crop_categories:
             category_dir = crops_dir / category
             if category_dir.exists():
                 crops = list(category_dir.glob("*.jpg")) + list(category_dir.glob("*.png"))
@@ -796,7 +841,7 @@ class IterativeDualGPUPipeline:
         generated = 0
         errors = 0
 
-        for category in ['tiny', 'small', 'medium', 'large', 'xlarge']:
+        for category in self.crop_categories:
             category_crop_dir = crops_dir / category
             category_mask_dir = masks_dir / category
             if not category_crop_dir.exists() or not category_mask_dir.exists():
@@ -844,6 +889,116 @@ class IterativeDualGPUPipeline:
 
         return {'generated': generated, 'errors': errors, 'layouts_dir': str(layouts_dir)}
 
+    def collect_dataset_from_results(
+        self,
+        filter_dir: Path,
+        masks_dir: Path
+    ) -> Dict:
+        """
+        Collect all passed crops and masks into a flat dataset structure.
+
+        Creates:
+            dataset_base_dir/real_texture_boundaries_<date>/images/
+            dataset_base_dir/real_texture_boundaries_<date>/masks/
+            dataset_base_dir/real_texture_boundaries_<date>/masks_textures/
+        """
+        date_str = datetime.now().strftime("%Y%m%d")
+        dataset_name = f"real_texture_boundaries_{date_str}"
+        dataset_dir = self.dataset_base_dir / dataset_name
+
+        images_dir = dataset_dir / "images"
+        masks_out_dir = dataset_dir / "masks"
+        masks_textures_dir = dataset_dir / "masks_textures"
+        images_dir.mkdir(parents=True, exist_ok=True)
+        masks_out_dir.mkdir(parents=True, exist_ok=True)
+        masks_textures_dir.mkdir(parents=True, exist_ok=True)
+
+        if self.verbose:
+            print(f"\n   📁 Dataset directory: {dataset_dir}")
+
+        passed_dir = filter_dir / "passed"
+        collected_images = 0
+        collected_masks = 0
+        collected_masks_a = 0
+        collected_masks_b = 0
+        skipped_masks = 0
+        skipped_masks_a = 0
+        skipped_masks_b = 0
+
+        for category in self.crop_categories:
+            category_dir = passed_dir / category
+            if not category_dir.exists():
+                continue
+
+            crops = list(category_dir.glob("*.jpg")) + list(category_dir.glob("*.png"))
+
+            for crop_path in crops:
+                crop_name = crop_path.name
+
+                dest_image = images_dir / crop_name
+                shutil.copy2(crop_path, dest_image)
+                collected_images += 1
+
+                mask_name = crop_name.replace('.jpg', '.png').replace('.jpeg', '.png')
+
+                mask_path = masks_dir / category / mask_name
+                if mask_path.exists():
+                    shutil.copy2(mask_path, masks_out_dir / mask_name)
+                    collected_masks += 1
+                else:
+                    skipped_masks += 1
+
+                masks_textures_source_dir = masks_dir.parent / "masks_textures"
+
+                mask_a_name = mask_name.replace('.png', '_mask_a.png')
+                mask_a_path = masks_textures_source_dir / category / mask_a_name
+                if mask_a_path.exists():
+                    shutil.copy2(mask_a_path, masks_textures_dir / mask_a_name)
+                    collected_masks_a += 1
+                else:
+                    skipped_masks_a += 1
+
+                mask_b_name = mask_name.replace('.png', '_mask_b.png')
+                mask_b_path = masks_textures_source_dir / category / mask_b_name
+                if mask_b_path.exists():
+                    shutil.copy2(mask_b_path, masks_textures_dir / mask_b_name)
+                    collected_masks_b += 1
+                else:
+                    skipped_masks_b += 1
+
+        info = {
+            'dataset_name': dataset_name,
+            'created': datetime.now().isoformat(),
+            'source_filter_dir': str(filter_dir),
+            'source_masks_dir': str(masks_dir),
+            'total_images': collected_images,
+            'total_masks': collected_masks,
+            'total_masks_a': collected_masks_a,
+            'total_masks_b': collected_masks_b,
+            'skipped_masks': skipped_masks,
+            'skipped_masks_a': skipped_masks_a,
+            'skipped_masks_b': skipped_masks_b,
+            'entropy_threshold': self.entropy_threshold
+        }
+        save_json(info, dataset_dir / "dataset_info.json")
+
+        summary = {
+            'dataset_name': dataset_name,
+            'dataset_dir': str(dataset_dir),
+            'collected_images': collected_images,
+            'collected_masks': collected_masks,
+            'collected_masks_a': collected_masks_a,
+            'collected_masks_b': collected_masks_b,
+            'skipped_masks': skipped_masks,
+            'skipped_masks_a': skipped_masks_a,
+            'skipped_masks_b': skipped_masks_b
+        }
+
+        if self.verbose:
+            print(f"   ✅ Collected {collected_images} images, {collected_masks} masks")
+
+        return summary
+
     def _print_summary(self, summary: Dict):
         """Print final summary."""
         print("\n" + "="*70)
@@ -879,6 +1034,9 @@ def run_iterative_dual_gpu_pipeline(
     refinement_min_object_size: int = 100,
     refinement_closing_kernel_size: int = 7,
     refinement_gaussian_sigma: float = 3.0,
+    crop_categories: List[str] = None,
+    collect_dataset: bool = True,
+    dataset_base_dir: Union[str, Path] = "/datasets/ade20k",
     **kwargs
 ) -> Dict:
     """
@@ -901,6 +1059,9 @@ def run_iterative_dual_gpu_pipeline(
         refinement_min_object_size: Min object size for refinement (default 100)
         refinement_closing_kernel_size: Kernel size for morphological closing (default 7)
         refinement_gaussian_sigma: Sigma for Gaussian blur smoothing (default 3.0)
+        crop_categories: List of size categories to process (default: all)
+        collect_dataset: Whether to collect passed crops into a dataset
+        dataset_base_dir: Base directory for dataset collection
         **kwargs: Additional pipeline arguments
 
     Returns:
@@ -929,6 +1090,9 @@ def run_iterative_dual_gpu_pipeline(
         refinement_min_object_size=refinement_min_object_size,
         refinement_closing_kernel_size=refinement_closing_kernel_size,
         refinement_gaussian_sigma=refinement_gaussian_sigma,
+        crop_categories=crop_categories,
+        collect_dataset=collect_dataset,
+        dataset_base_dir=dataset_base_dir,
         **kwargs
     )
 
