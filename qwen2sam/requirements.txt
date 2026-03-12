@@ -1,0 +1,15 @@
+# Qwen2SAM - Phase 1 dependencies
+# Install SAM 2: pip install SAM-2
+# Install from source if pip fails:
+#   git clone https://github.com/facebookresearch/sam2.git
+#   cd sam2 && pip install -e .
+SAM-2>=1.0
+PyYAML>=6.0
+scipy>=1.10.0
+opencv-python>=4.8.0
+wandb>=0.16.0
+
+# Phase 3 dependencies (install later)
+# peft>=0.7.0
+# transformers>=4.45.0
+# qwen-vl-utils>=0.0.10

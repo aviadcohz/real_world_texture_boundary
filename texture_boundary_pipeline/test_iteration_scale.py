@@ -22,7 +22,7 @@ model = create_model('qwen-8b', device='cuda')
 REMOTE_URL = "http://132.66.150.69:8000"
 
 # Number of images to process (None = all images)
-num_images = None
+num_images = 100
 
 results = run_iterative_dual_gpu_pipeline(
     local_model=model,
@@ -38,7 +38,7 @@ results = run_iterative_dual_gpu_pipeline(
     verbose=True,
     crop_categories=['medium', 'large', 'xlarge'],
     collect_dataset=True,
-    dataset_base_dir='/datasets/google_landmarks_v2/training_qwen2sam/',
+    dataset_base_dir='/datasets/training_qwen2sam/google_landmarks_v2/',
 )
 
 print(f"\n📁 Results saved to: {results['output_dir']}")

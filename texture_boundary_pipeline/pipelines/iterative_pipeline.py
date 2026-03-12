@@ -206,6 +206,34 @@ class IterativePipeline:
                 mask_a = self.sa2va_model.segment_texture(crop_path, texture_a)
                 mask_b = self.sa2va_model.segment_texture(crop_path, texture_b)
 
+                # Check minimum mask coverage (each mask must cover >= 10% of crop)
+                total_px = mask_a.shape[0] * mask_a.shape[1]
+                cov_a = (mask_a > 127).sum() / total_px
+                cov_b = (mask_b > 127).sum() / total_px
+                min_coverage = 0.10
+
+                if cov_a < min_coverage or cov_b < min_coverage:
+                    if self.verbose:
+                        print(f"✗ LOW COVERAGE (A={cov_a:.1%}, B={cov_b:.1%})")
+                    result = {
+                        'crop_name': crop_name,
+                        'crop_path': str(crop_path),
+                        'category': category,
+                        'description': description,
+                        'texture_a': texture_a,
+                        'texture_b': texture_b,
+                        'coverage_a': round(cov_a, 3),
+                        'coverage_b': round(cov_b, 3),
+                        'passed': False,
+                        'fail_reason': 'low_coverage',
+                    }
+                    filter_results.append(result)
+                    failed_crops.append(result)
+                    filter_failed_dir = filter_dir / "failed" / category
+                    filter_failed_dir.mkdir(parents=True, exist_ok=True)
+                    shutil.copy2(crop_path, filter_failed_dir / crop_name)
+                    continue
+
                 # Compute entropy for each region
                 entropy_a = compute_region_entropy(crop_image, mask_a)
                 entropy_b = compute_region_entropy(crop_image, mask_b)
@@ -355,26 +383,19 @@ class IterativePipeline:
         masks_dir: Path
     ) -> Dict:
         """
-        Collect all passed crops and masks into a flat dataset structure.
+        Collect all passed crops and masks into a flat dataset structure
+        with metadata_phase1.json compatible with Qwen2SAM training.
 
         Creates:
-            /datasets/real_texture_boundaries_<date>/images/         - all passed crops
-            /datasets/real_texture_boundaries_<date>/masks/          - boundary masks
-            /datasets/real_texture_boundaries_<date>/masks_textures/ - texture A & B masks (with suffixes)
-
-        Args:
-            filter_dir: Directory containing filter results (with passed/ subfolder)
-            masks_dir: Directory containing masks (organized by size category)
-
-        Returns:
-            Dict with collection statistics
+            dataset_base_dir/real_texture_boundaries_<date>/images/
+            dataset_base_dir/real_texture_boundaries_<date>/masks/
+            dataset_base_dir/real_texture_boundaries_<date>/masks_textures/
+            dataset_base_dir/real_texture_boundaries_<date>/metadata_phase1.json
         """
-        # Generate dataset name with date
         date_str = datetime.now().strftime("%Y%m%d")
         dataset_name = f"real_texture_boundaries_{date_str}"
         dataset_dir = self.dataset_base_dir / dataset_name
 
-        # Create output directories
         images_dir = dataset_dir / "images"
         masks_out_dir = dataset_dir / "masks"
         masks_textures_dir = dataset_dir / "masks_textures"
@@ -385,7 +406,15 @@ class IterativePipeline:
         if self.verbose:
             print(f"\n   📁 Dataset directory: {dataset_dir}")
 
-        # Collect all passed crops from all size categories
+        # Load filter results to get per-crop metadata
+        filter_results_path = filter_dir / "entropy_filter_results.json"
+        filter_lookup = {}
+        if filter_results_path.exists():
+            with open(filter_results_path) as f:
+                for entry in json.load(f):
+                    if entry.get('passed'):
+                        filter_lookup[entry['crop_name']] = entry
+
         passed_dir = filter_dir / "passed"
         collected_images = 0
         collected_masks = 0
@@ -394,6 +423,7 @@ class IterativePipeline:
         skipped_masks = 0
         skipped_masks_a = 0
         skipped_masks_b = 0
+        metadata_entries = []
 
         for category in self.crop_categories:
             category_dir = passed_dir / category
@@ -405,53 +435,72 @@ class IterativePipeline:
             for crop_path in crops:
                 crop_name = crop_path.name
 
-                # Copy crop to images/ (flat)
                 dest_image = images_dir / crop_name
                 shutil.copy2(crop_path, dest_image)
                 collected_images += 1
 
-                # Find and copy matching masks (boundary + texture A + B)
                 mask_name = crop_name.replace('.jpg', '.png').replace('.jpeg', '.png')
+                crop_stem = crop_path.stem
 
-                # Copy boundary mask from masks/category/
+                # Copy boundary mask
                 mask_path = masks_dir / category / mask_name
+                dest_mask = masks_out_dir / mask_name
                 if mask_path.exists():
-                    dest_mask = masks_out_dir / mask_name
                     shutil.copy2(mask_path, dest_mask)
                     collected_masks += 1
                 else:
                     skipped_masks += 1
-                    if self.verbose:
-                        print(f"   ⚠️  Boundary mask not found for: {crop_name}")
 
-                # Copy texture masks from masks_textures/category/
+                # Copy texture masks
                 masks_textures_source_dir = masks_dir.parent / "masks_textures"
 
-                # Copy texture A mask with suffix
                 mask_a_name = mask_name.replace('.png', '_mask_a.png')
                 mask_a_path = masks_textures_source_dir / category / mask_a_name
+                dest_mask_a = masks_textures_dir / mask_a_name
                 if mask_a_path.exists():
-                    dest_mask_a = masks_textures_dir / mask_a_name
                     shutil.copy2(mask_a_path, dest_mask_a)
                     collected_masks_a += 1
                 else:
                     skipped_masks_a += 1
-                    if self.verbose:
-                        print(f"   ⚠️  Texture A mask not found for: {crop_name}")
 
-                # Copy texture B mask with suffix
                 mask_b_name = mask_name.replace('.png', '_mask_b.png')
                 mask_b_path = masks_textures_source_dir / category / mask_b_name
+                dest_mask_b = masks_textures_dir / mask_b_name
                 if mask_b_path.exists():
-                    dest_mask_b = masks_textures_dir / mask_b_name
                     shutil.copy2(mask_b_path, dest_mask_b)
                     collected_masks_b += 1
                 else:
                     skipped_masks_b += 1
-                    if self.verbose:
-                        print(f"   ⚠️  Texture B mask not found for: {crop_name}")
 
-        # Save dataset info
+                # Build metadata entry (Qwen2SAM format)
+                filter_entry = filter_lookup.get(crop_name, {})
+
+                try:
+                    with Image.open(dest_image) as img:
+                        w, h = img.size
+                except Exception:
+                    w, h = 256, 256
+
+                metadata_entry = {
+                    "image": str(dest_image),
+                    "image_path": str(dest_image),
+                    "mask_path": str(dest_mask),
+                    "mask_a_path": str(dest_mask_a),
+                    "mask_b_path": str(dest_mask_b),
+                    "texture_a": filter_entry.get("texture_a", ""),
+                    "texture_b": filter_entry.get("texture_b", ""),
+                    "description": filter_entry.get("description", ""),
+                    "coords": [0, 0, w, h],
+                    "crop_name": crop_stem,
+                    "oracle_points": filter_entry.get("oracle_points", {}),
+                    "entropy_a": filter_entry.get("entropy_a", 0),
+                    "entropy_b": filter_entry.get("entropy_b", 0),
+                }
+                metadata_entries.append(metadata_entry)
+
+        # Save metadata_phase1.json (Qwen2SAM training format)
+        save_json(metadata_entries, dataset_dir / "metadata_phase1.json")
+
         info = {
             'dataset_name': dataset_name,
             'created': datetime.now().isoformat(),
@@ -466,25 +515,89 @@ class IterativePipeline:
             'skipped_masks_b': skipped_masks_b,
             'entropy_threshold': self.entropy_threshold
         }
-        info_path = dataset_dir / "dataset_info.json"
-        save_json(info, info_path)
+        save_json(info, dataset_dir / "dataset_info.json")
+
+        # Generate overlay visualizations (texture A=red, B=blue)
+        overlay_stats = self._generate_overlays(dataset_dir)
 
         summary = {
             'dataset_name': dataset_name,
             'dataset_dir': str(dataset_dir),
-            'images_dir': str(images_dir),
-            'masks_dir': str(masks_out_dir),
-            'masks_textures_dir': str(masks_textures_dir),
             'collected_images': collected_images,
             'collected_masks': collected_masks,
             'collected_masks_a': collected_masks_a,
             'collected_masks_b': collected_masks_b,
             'skipped_masks': skipped_masks,
             'skipped_masks_a': skipped_masks_a,
-            'skipped_masks_b': skipped_masks_b
+            'skipped_masks_b': skipped_masks_b,
+            'metadata_entries': len(metadata_entries),
+            'overlays_generated': overlay_stats['generated'],
         }
 
+        if self.verbose:
+            print(f"\n   ✅ Collected {collected_images} images, {collected_masks} masks")
+            print(f"   ✅ metadata_phase1.json: {len(metadata_entries)} entries")
+
         return summary
+
+    def _generate_overlays(self, dataset_dir: Path, alpha: float = 0.4) -> Dict:
+        """Generate overlay images with both texture masks colored on the crop.
+
+        Texture A = red, Texture B = blue. Saved to dataset_dir/overlays/.
+        """
+        images_dir = dataset_dir / "images"
+        masks_textures_dir = dataset_dir / "masks_textures"
+        overlays_dir = dataset_dir / "overlays"
+        overlays_dir.mkdir(parents=True, exist_ok=True)
+
+        generated = 0
+        errors = 0
+
+        for img_path in sorted(images_dir.glob("*.jpg")) + sorted(images_dir.glob("*.png")):
+            try:
+                crop = np.array(Image.open(img_path).convert("RGB"))
+                mask_name = img_path.stem + ".png"
+                mask_a_path = masks_textures_dir / mask_name.replace('.png', '_mask_a.png')
+                mask_b_path = masks_textures_dir / mask_name.replace('.png', '_mask_b.png')
+
+                if not mask_a_path.exists() or not mask_b_path.exists():
+                    continue
+
+                mask_a = np.array(Image.open(mask_a_path).convert("L"))
+                mask_b = np.array(Image.open(mask_b_path).convert("L"))
+
+                if mask_a.shape[:2] != crop.shape[:2]:
+                    mask_a = cv2.resize(mask_a, (crop.shape[1], crop.shape[0]), interpolation=cv2.INTER_NEAREST)
+                if mask_b.shape[:2] != crop.shape[:2]:
+                    mask_b = cv2.resize(mask_b, (crop.shape[1], crop.shape[0]), interpolation=cv2.INTER_NEAREST)
+
+                region_a = mask_a > 127
+                region_b = mask_b > 127
+
+                result = crop.copy().astype(np.float32)
+
+                if region_a.any():
+                    overlay_a = np.zeros_like(crop, dtype=np.float32)
+                    overlay_a[region_a] = [255, 0, 0]
+                    result[region_a] = (1 - alpha) * result[region_a] + alpha * overlay_a[region_a]
+
+                if region_b.any():
+                    overlay_b = np.zeros_like(crop, dtype=np.float32)
+                    overlay_b[region_b] = [0, 0, 255]
+                    result[region_b] = (1 - alpha) * result[region_b] + alpha * overlay_b[region_b]
+
+                Image.fromarray(result.astype(np.uint8)).save(overlays_dir / img_path.name, quality=90)
+                generated += 1
+            except Exception as e:
+                errors += 1
+                if self.verbose:
+                    print(f"      Overlay error for {img_path.name}: {e}")
+
+        if self.verbose:
+            print(f"   ✅ Overlays generated: {generated} (errors: {errors})")
+            print(f"   📁 {overlays_dir}")
+
+        return {'generated': generated, 'errors': errors}
 
     def _generate_layouts(self, crops_dir: Path, masks_dir: Path, layouts_dir: Path, alpha: float = 0.5) -> Dict:
         """Generate layout images: crop with mask boundary emphasized in green.

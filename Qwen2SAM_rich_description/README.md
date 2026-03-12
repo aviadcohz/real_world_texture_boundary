@@ -28,8 +28,8 @@ Tracker adds **+4.5% mIoU** and **+10.1% ARI** over DETR alone.
 
 ```
 ┌─────────────────────────────────────────────────────────────────┐
-│                        INPUT                                     │
-│   Image (1008x1008) + Text prompt ("Identify two textures...")   │
+│                        INPUT                                    │
+│   Image (1008x1008) + Text prompt ("Identify two textures...")  │
 └──────────────────────────┬──────────────────────────────────────┘
                            │
                     ┌──────▼──────┐
@@ -66,7 +66,7 @@ Tracker adds **+4.5% mIoU** and **+10.1% ARI** over DETR alone.
     └──────┬──────┘ └──────┬──────┘        │
            │               │               │
     Coarse masks      Coarse masks         │
-    (B, 200, 288²)   (B, 200, 288²)       │
+    (B, 200, 288²)   (B, 200, 288²)        │
            │               │               │
            └───────┬───────┘               │
                    │ (select best,         │
@@ -79,7 +79,8 @@ Tracker adds **+4.5% mIoU** and **+10.1% ARI** over DETR alone.
             └──────────────┬───────────────────────┘
                            │
                     Refined masks
-                    (B, 1, 288x288) per texture
+                    (B, 1, 288x288) 
+                    per texture
 ```
 
 ---

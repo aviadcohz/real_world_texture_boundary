@@ -1,0 +1,82 @@
+# =============================================================================
+# Qwen2SAM v2: Multi-token projector (reshape) — Stage 1 DETR training
+# 2048-dim Qwen → view(8, 256) → 8 tokens injected into SAM3 fusion encoder
+# 10 train images
+# =============================================================================
+
+model:
+  qwen_model: "Qwen/Qwen2.5-VL-3B-Instruct"
+  qwen_dtype: "bfloat16"
+  gradient_checkpointing: true
+
+  lora_r: 16
+  lora_alpha: 32
+  lora_dropout: 0.0
+  lora_target_modules: ["q_proj", "v_proj"]
+
+  projector_type: "multi_token"
+  projector_num_tokens: 8
+  projector_variant: "reshape"
+
+  sam3_checkpoint: null
+  freeze_decoder_layers: true
+  sam3_lr_scale: 1.0
+  image_size: 1008
+
+hires:
+  enabled: false
+  thin_dim: 32
+
+data:
+  data_root: "/home/aviad/RWTD"
+  metadata_file: "metadata_phase1.json"
+  train_size: 10
+  val_size: 20
+  num_workers: 2
+  pin_memory: true
+
+  system_prompt: "You are a texture boundary segmentation assistant. Describe each texture using its material, pattern structure, and size or shape features. Focus on what makes each texture visually different from the other. Mark textures with <SEG_A> and <SEG_B> tokens."
+  user_prompt: "Identify the two textures in this image. For each, describe its material, pattern, and distinctive visual features in 5-10 words, then segment them."
+
+training:
+  batch_size: 1
+  gradient_accumulation_steps: 8
+  num_epochs: 100
+  learning_rate: 1.0e-4
+  weight_decay: 0.01
+  warmup_epochs: 3
+  min_lr: 1.0e-6
+  max_grad_norm: 1.0
+  seg_grad_to_lm: false
+
+loss:
+  seg_weight: 1.0
+  focal_weight: 5.0
+  dice_weight: 1.0
+  cls_weight: 2.0
+  box_l1_weight: 5.0
+  box_giou_weight: 2.0
+  exclusivity_weight: 0.5
+  alignment_weight: 1.0
+  alignment_temperature: 0.07
+  lm_weight: 1.0
+
+amp:
+  enabled: true
+  dtype: "bfloat16"
+
+checkpoint:
+  dir: "checkpoints/v2_multitoken_reshape"
+  save_every_n_epochs: 5
+  keep_last_n: 3
+
+logging:
+  log_every_n_steps: 5
+  use_wandb: false
+  wandb_project: "qwen2sam-v2"
+  wandb_run_name: "v2-multitoken-reshape"
+
+validation:
+  every_n_epochs: 1
+
+seed: 42

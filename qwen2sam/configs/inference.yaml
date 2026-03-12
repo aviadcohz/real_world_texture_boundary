@@ -1,0 +1,73 @@
+# =============================================================================
+# Phase 4: Inference Configuration
+# End-to-end Qwen2SAM prediction + morphological boundary extraction
+# =============================================================================
+
+model:
+  # --- Qwen3-VL ---
+  qwen_model: "Qwen/Qwen2.5-VL-7B-Instruct"   # Change to Qwen3-VL when available
+  qwen_dtype: "bfloat16"
+  gradient_checkpointing: false                 # Not needed at inference
+
+  # --- LoRA ---
+  lora_r: 16
+  lora_alpha: 32
+  lora_dropout: 0.0                             # No dropout at inference
+  lora_target_modules: ["q_proj", "v_proj"]
+
+  # --- Projector ---
+  projector_hidden_dim: 1024
+
+  # --- SAM 2.1 ---
+  sam_model: "facebook/sam2.1-hiera-large"
+  freeze_sam_decoder: true                      # Everything frozen at inference
+  image_size: 1024
+
+data:
+  system_prompt: "You are a texture boundary segmentation assistant. When you identify a texture transition, describe each texture and mark it with <SEG_A> and <SEG_B> tokens."
+  user_prompt: "Describe and segment the texture transition in this image."
+
+inference:
+  # Generation parameters
+  max_new_tokens: 128
+  temperature: 0.1                              # Low temperature for deterministic output
+
+  # Mask binarization
+  threshold: 0.5
+
+  # Post-processing pipeline
+  postprocess:
+    # Morphological cleanup
+    open_kernel_size: 3
+    open_iterations: 1
+    close_kernel_size: 3
+    close_iterations: 1
+
+    # Soft erosion before boundary extraction
+    erode_kernel_size: 3
+    erode_iterations: 1
+
+    # Interface extraction (boundary dilation)
+    boundary_dilate_kernel_size: 3
+    boundary_dilate_iterations: 3
+
+    # Skeletonization method
+    thin_method: "zhang_suen"                   # "zhang_suen" or "morphological"
+
+    # Minimum connected component area (remove noise fragments)
+    min_component_area: 50
+
+checkpoint:
+  phase3_checkpoint: "checkpoints/phase3/best.pt"
+
+# Visualization
+visualization:
+  mask_alpha: 0.4                               # Mask overlay opacity
+  mask_a_color: [255, 50, 50]                   # Red for texture A
+  mask_b_color: [50, 50, 255]                   # Blue for texture B
+  boundary_color: [0, 255, 0]                   # Green for boundary line
+  boundary_thickness: 2                         # Boundary overlay thickness
+
+amp:
+  enabled: true
+  dtype: "bfloat16"

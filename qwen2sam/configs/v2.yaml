@@ -1,0 +1,101 @@
+# =============================================================================
+# Qwen2SAM v2: SAM3 DETR-based architecture
+#
+# Architecture:
+#   Qwen2.5-VL-3B (LoRA) → MLP Projector → SAM3 Fusion Encoder → DETR Decoder
+#   → Segmentation Head → Masks
+#
+# Trainable: LoRA, Projector, Fusion Encoder, Obj Queries, Seg Head, Box Head
+# Frozen: ViT backbone (446M), Text Encoder (354M), Decoder layers (initially)
+# =============================================================================
+
+model:
+  qwen_model: "Qwen/Qwen2.5-VL-3B-Instruct"
+  qwen_dtype: "bfloat16"
+  gradient_checkpointing: true
+
+  lora_r: 16
+  lora_alpha: 32
+  lora_dropout: 0.0
+  lora_target_modules: ["q_proj", "v_proj"]
+
+  projector_hidden_dim: 1024
+
+  # SAM3 config
+  sam3_checkpoint: null  # null = auto-download from HuggingFace
+  freeze_decoder_layers: true
+  sam3_lr_scale: 1.0
+
+  image_size: 1008  # SAM3 native resolution
+
+  # Alignment embedder
+  align_embedder: "qwen"              # "qwen" or "sentence"
+  align_embed_dim: 0                  # 0 = no projection (use Qwen dim directly)
+  align_model_name: "all-mpnet-base-v2"
+
+# High-resolution mask head (learned upsample from 288→1008)
+hires:
+  enabled: false
+  thin_dim: 32
+
+data:
+  data_root: "/home/aviad/RWTD"
+  metadata_file: "metadata_phase1.json"
+  # 10 train / 20 val / 223 test
+  train_size: 10
+  val_size: 20
+  num_workers: 2
+  pin_memory: true
+
+  system_prompt: "You are a texture boundary segmentation assistant. Describe each texture using its material, pattern structure, and size or shape features. Focus on what makes each texture visually different from the other. Mark textures with <SEG_A> and <SEG_B> tokens."
+  user_prompt: "Identify the two textures in this image. For each, describe its material, pattern, and distinctive visual features in 5-10 words, then segment them."
+
+training:
+  batch_size: 1
+  gradient_accumulation_steps: 8
+  num_epochs: 100
+  learning_rate: 1.0e-4
+  weight_decay: 0.01
+  warmup_epochs: 3
+  min_lr: 1.0e-6
+  max_grad_norm: 1.0
+
+  # Gradient isolation: seg_loss does NOT flow to LoRA
+  seg_grad_to_lm: false
+
+loss:
+  # Segmentation losses (DETR-style)
+  seg_weight: 1.0
+  focal_weight: 5.0
+  dice_weight: 1.0
+  cls_weight: 2.0
+  box_l1_weight: 5.0
+  box_giou_weight: 2.0
+  exclusivity_weight: 0.5
+
+  # Alignment loss (contrastive, trains LoRA)
+  alignment_weight: 1.0
+  alignment_temperature: 0.07
+
+  # LM loss for texture description generation
+  lm_weight: 0.0
+
+amp:
+  enabled: true
+  dtype: "bfloat16"
+
+checkpoint:
+  dir: "checkpoints/v2_no_lm"
+  save_every_n_epochs: 5
+  keep_last_n: 3
+
+logging:
+  log_every_n_steps: 5
+  use_wandb: false
+  wandb_project: "qwen2sam-v2"
+  wandb_run_name: "v2-no-lm"
+
+validation:
+  every_n_epochs: 1
+
+seed: 42

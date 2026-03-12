@@ -103,6 +103,28 @@ class Sa2VAModel:
         """Check if model is loaded."""
         return self._is_loaded
 
+    @staticmethod
+    def _simplify_description(texture_description: str) -> str:
+        """
+        Simplify a rich texture description to 2-3 core words for Sa2VA.
+
+        Sa2VA works best with short material-focused descriptions like
+        "grass", "stone surface", "rough brick" rather than long phrases
+        like "dense green grass texture with short blades".
+        """
+        # Strip everything after "with" or "and" — they add details Sa2VA can't use
+        desc = texture_description.lower()
+        for separator in [' with ', ' and ']:
+            if separator in desc:
+                desc = desc[:desc.index(separator)]
+
+        # Remove articles and filler
+        filler = {'the', 'a', 'an', 'of', 'in', 'on', 'very'}
+        words = [w for w in desc.split() if w not in filler]
+
+        # Keep max 3 words
+        return ' '.join(words[:3]) if words else texture_description
+
     def segment_texture(
         self,
         image: Union[str, Path, Image.Image],
@@ -127,17 +149,26 @@ class Sa2VAModel:
 
         orig_size = image.size
 
-        # Run segmentation
+        # Simplify description for Sa2VA (works best with 2-3 word descriptions)
+        short_desc = self._simplify_description(texture_description)
+
+        prompt = f"<image>Can you segment the {short_desc} in this image?"
         result = self.model.predict_forward(
             image=image,
-            text=f"segment all regions with {texture_description}",
+            text=prompt,
+            past_text='',
+            mask_prompts=None,
             tokenizer=self.tokenizer,
-            processor=self.processor
+            processor=self.processor,
         )
 
-        # Convert to mask
-        mask = self._convert_to_mask(result['prediction_masks'][0], orig_size)
+        # Check if we got a valid mask
+        masks = result.get('prediction_masks', [])
+        if not masks or len(masks) == 0:
+            width, height = orig_size
+            return np.zeros((height, width), dtype=np.uint8)
 
+        mask = self._convert_to_mask(masks[0], orig_size)
         return mask
 
     def batch_segment_texture(

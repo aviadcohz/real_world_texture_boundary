@@ -1,0 +1,106 @@
+# =============================================================================
+# Qwen2SAM v2 IMPROVED: Fixes for convergence issues
+#
+# Changes from v2.yaml:
+#   1. Sentence embedder (768-dim) instead of weak Qwen embedder
+#   2. All 26 training samples (was 10)
+#   3. LM loss enabled (weight=0.3) for richer SEG token embeddings
+#   4. seg_grad_to_lm with warmup (enabled after epoch 10)
+#   5. Data augmentation enabled
+#   6. Alignment with memory bank (bank_size=32)
+# =============================================================================
+
+model:
+  qwen_model: "Qwen/Qwen2.5-VL-3B-Instruct"
+  qwen_dtype: "bfloat16"
+  gradient_checkpointing: true
+
+  lora_r: 16
+  lora_alpha: 32
+  lora_dropout: 0.0
+  lora_target_modules: ["q_proj", "v_proj"]
+
+  projector_hidden_dim: 1024
+
+  # SAM3 config
+  sam3_checkpoint: null
+  freeze_decoder_layers: true
+  sam3_lr_scale: 1.0
+
+  image_size: 1008
+
+  # FIX #1: Use sentence embedder (much better discrimination than qwen)
+  align_embedder: "sentence"
+  align_embed_dim: 768
+  align_model_name: "all-mpnet-base-v2"
+
+hires:
+  enabled: false
+  thin_dim: 32
+
+data:
+  data_root: "/home/aviad/RWTD"
+  metadata_file: "metadata_phase1.json"
+  # FIX #4: Use all 26 training samples (was 10)
+  train_size: 26
+  val_size: 0
+  num_workers: 2
+  pin_memory: true
+  # FIX #5: Enable data augmentation
+  augmentation: true
+
+  system_prompt: "You are a texture boundary segmentation assistant. Describe each texture using its material, pattern structure, and size or shape features. Focus on what makes each texture visually different from the other. Mark textures with <SEG_A> and <SEG_B> tokens."
+  user_prompt: "Identify the two textures in this image. For each, describe its material, pattern, and distinctive visual features in 5-10 words, then segment them."
+
+training:
+  batch_size: 1
+  gradient_accumulation_steps: 8
+  num_epochs: 100
+  learning_rate: 1.0e-4
+  weight_decay: 0.01
+  warmup_epochs: 3
+  min_lr: 1.0e-6
+  max_grad_norm: 1.0
+
+  # FIX #2: Enable seg gradients to LoRA after warmup
+  seg_grad_to_lm: true
+  seg_grad_warmup_epochs: 10   # First 10 epochs: alignment-only for LoRA
+
+loss:
+  # Segmentation losses (DETR-style)
+  seg_weight: 1.0
+  focal_weight: 5.0
+  dice_weight: 1.0
+  cls_weight: 2.0
+  box_l1_weight: 5.0
+  box_giou_weight: 2.0
+  exclusivity_weight: 0.5
+
+  # Alignment loss with memory bank
+  alignment_weight: 1.0
+  alignment_temperature: 0.07
+  # FIX #6: Memory bank for richer negatives
+  alignment_bank_size: 32
+
+  # FIX #3: Enable LM loss for richer SEG embeddings
+  lm_weight: 0.3
+
+amp:
+  enabled: true
+  dtype: "bfloat16"
+
+checkpoint:
+  dir: "checkpoints/v2_improved"
+  save_every_n_epochs: 5
+  keep_last_n: 3
+
+logging:
+  log_every_n_steps: 5
+  use_wandb: false
+  wandb_project: "qwen2sam-v2"
+  wandb_run_name: "v2-improved"
+
+validation:
+  every_n_epochs: 1
+
+seed: 42

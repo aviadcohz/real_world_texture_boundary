@@ -1,0 +1,11 @@
+{
+  "root": ".",
+  "extraPaths": [
+    ".",
+    "/home/aviad/real_world_texture_boundary/texture_boundary_Architexture"
+  ],
+  "pythonVersion": "3.11",
+  "pythonPlatform": "Linux",
+  "venvPath": "/home/aviad/miniconda3/envs",
+  "venv": "texture_boundary"
+}

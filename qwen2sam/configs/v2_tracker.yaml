@@ -1,0 +1,115 @@
+# =============================================================================
+# Qwen2SAM v2_tracker: Stage 2 — DETR + SAM3 Tracker with Qwen Point Coords
+#
+# Architecture:
+#   Stage 1 (DETR): Qwen → SEG tokens → Projector → SAM3 Fusion → DETR → coarse masks
+#   Stage 2 (Tracker): Qwen → POINT tokens → CoordHead → (x,y) coords
+#                       + coarse DETR mask → SAM3 prompt encoder + mask decoder → refined masks
+#
+# Trainable: LoRA, Projector (low LR), DETR (low LR), CoordHead, SAM tracker heads
+# Frozen: ViT backbone, sam2_convs
+# =============================================================================
+
+model:
+  qwen_model: "Qwen/Qwen2.5-VL-3B-Instruct"
+  qwen_dtype: "bfloat16"
+  gradient_checkpointing: true
+
+  lora_r: 16
+  lora_alpha: 32
+  lora_dropout: 0.0
+  lora_target_modules: ["q_proj", "v_proj"]
+
+  projector_hidden_dim: 1024
+
+  # SAM3 config
+  sam3_checkpoint: null  # null = auto-download from HuggingFace
+  freeze_decoder_layers: true
+  sam3_lr_scale: 1.0
+
+  image_size: 1008  # SAM3 native resolution
+
+# High-resolution mask head (disabled for tracker approach)
+hires:
+  enabled: false
+  thin_dim: 32
+
+# Tracker configuration (Stage 2)
+tracker:
+  v2_checkpoint: "checkpoints/v2/best.pt"  # Stage 1 weights
+  num_points_per_texture: 4                 # 4 points × 2 textures = 8 tokens
+  coord_head_dim: 256                       # MLP hidden dim for coord regression
+  freeze_detr: false                        # Keep DETR trainable with lower LR
+  detr_lr_scale: 0.1                        # 10× lower LR for DETR components
+  tracker_lr_scale: 1.0                     # Full LR for tracker components
+
+data:
+  data_root: "/home/aviad/RWTD"
+  metadata_file: "metadata_phase1.json"
+  # 10 train / 20 val / 223 test
+  train_size: 10
+  val_size: 20
+  num_workers: 2
+  pin_memory: true
+
+  system_prompt: "You are a texture boundary segmentation assistant. When you identify a texture transition, describe each texture and mark it with <SEG_A> and <SEG_B> tokens, then provide representative point coordinates for each texture region."
+  user_prompt: "Describe and segment the texture transition in this image."
+
+training:
+  batch_size: 1
+  gradient_accumulation_steps: 8
+  num_epochs: 100
+  learning_rate: 2.0e-5
+  weight_decay: 0.01
+  warmup_epochs: 3
+  min_lr: 1.0e-6
+  max_grad_norm: 1.0
+
+  # Gradient isolation: seg_loss does NOT flow to LoRA
+  seg_grad_to_lm: false
+
+loss:
+  # DETR loss (from Stage 1, reduced weight)
+  detr_weight: 0.5
+  focal_weight: 5.0
+  dice_weight: 1.0
+  cls_weight: 2.0
+  box_l1_weight: 5.0
+  box_giou_weight: 2.0
+  exclusivity_weight: 0.5
+
+  # Tracker loss
+  tracker_weight: 1.0
+  tracker_focal_weight: 5.0
+  tracker_dice_weight: 1.0
+  tracker_exclusivity_weight: 0.5
+
+  # Reconstruction loss (autoencoder, trains PointProjector)
+  reconstruction_weight: 0.5
+
+  # Alignment loss (contrastive, trains LoRA)
+  alignment_weight: 1.0
+  alignment_temperature: 0.07
+
+  # LM loss disabled
+  lm_weight: 0.0
+
+amp:
+  enabled: true
+  dtype: "bfloat16"
+
+checkpoint:
+  dir: "checkpoints/v2_tracker"
+  save_every_n_epochs: 5
+  keep_last_n: 3
+
+logging:
+  log_every_n_steps: 5
+  use_wandb: false
+  wandb_project: "qwen2sam-v2-tracker"
+  wandb_run_name: "v2-tracker"
+
+validation:
+  every_n_epochs: 1
+
+seed: 42

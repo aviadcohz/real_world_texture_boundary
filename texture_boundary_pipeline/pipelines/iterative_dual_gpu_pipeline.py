@@ -698,6 +698,34 @@ class IterativeDualGPUPipeline:
                 mask_a = self.sa2va_model.segment_texture(crop_path, texture_a)
                 mask_b = self.sa2va_model.segment_texture(crop_path, texture_b)
 
+                # Check minimum mask coverage (each mask must cover >= 10% of crop)
+                total_px = mask_a.shape[0] * mask_a.shape[1]
+                cov_a = (mask_a > 127).sum() / total_px
+                cov_b = (mask_b > 127).sum() / total_px
+                min_coverage = 0.10
+
+                if cov_a < min_coverage or cov_b < min_coverage:
+                    if self.verbose:
+                        print(f"✗ LOW COVERAGE (A={cov_a:.1%}, B={cov_b:.1%})")
+                    result = {
+                        'crop_name': crop_name,
+                        'crop_path': str(crop_path),
+                        'category': category,
+                        'description': description,
+                        'texture_a': texture_a,
+                        'texture_b': texture_b,
+                        'coverage_a': round(cov_a, 3),
+                        'coverage_b': round(cov_b, 3),
+                        'passed': False,
+                        'fail_reason': 'low_coverage',
+                    }
+                    filter_results.append(result)
+                    failed_crops.append(result)
+                    filter_failed_dir = filter_dir / "failed" / category
+                    filter_failed_dir.mkdir(parents=True, exist_ok=True)
+                    shutil.copy2(crop_path, filter_failed_dir / crop_name)
+                    continue
+
                 # Compute entropy for each region
                 entropy_a = compute_region_entropy(crop_image, mask_a)
                 entropy_b = compute_region_entropy(crop_image, mask_b)
@@ -889,18 +917,82 @@ class IterativeDualGPUPipeline:
 
         return {'generated': generated, 'errors': errors, 'layouts_dir': str(layouts_dir)}
 
+    def _generate_overlays(self, dataset_dir: Path, alpha: float = 0.4) -> Dict:
+        """Generate overlay images with both texture masks colored on the crop.
+
+        Texture A = red, Texture B = blue. Saved to dataset_dir/overlays/.
+        """
+        images_dir = dataset_dir / "images"
+        masks_textures_dir = dataset_dir / "masks_textures"
+        overlays_dir = dataset_dir / "overlays"
+        overlays_dir.mkdir(parents=True, exist_ok=True)
+
+        generated = 0
+        errors = 0
+
+        for img_path in sorted(images_dir.glob("*.jpg")) + sorted(images_dir.glob("*.png")):
+            try:
+                crop = np.array(Image.open(img_path).convert("RGB"))
+                mask_name = img_path.stem + ".png"
+                mask_a_path = masks_textures_dir / mask_name.replace('.png', '_mask_a.png')
+                mask_b_path = masks_textures_dir / mask_name.replace('.png', '_mask_b.png')
+
+                if not mask_a_path.exists() or not mask_b_path.exists():
+                    continue
+
+                mask_a = np.array(Image.open(mask_a_path).convert("L"))
+                mask_b = np.array(Image.open(mask_b_path).convert("L"))
+
+                # Resize masks to match crop if needed
+                if mask_a.shape[:2] != crop.shape[:2]:
+                    mask_a = cv2.resize(mask_a, (crop.shape[1], crop.shape[0]), interpolation=cv2.INTER_NEAREST)
+                if mask_b.shape[:2] != crop.shape[:2]:
+                    mask_b = cv2.resize(mask_b, (crop.shape[1], crop.shape[0]), interpolation=cv2.INTER_NEAREST)
+
+                region_a = mask_a > 127
+                region_b = mask_b > 127
+
+                result = crop.copy().astype(np.float32)
+
+                # Texture A = red overlay
+                if region_a.any():
+                    overlay_a = np.zeros_like(crop, dtype=np.float32)
+                    overlay_a[region_a] = [255, 0, 0]
+                    result[region_a] = (1 - alpha) * result[region_a] + alpha * overlay_a[region_a]
+
+                # Texture B = blue overlay
+                if region_b.any():
+                    overlay_b = np.zeros_like(crop, dtype=np.float32)
+                    overlay_b[region_b] = [0, 0, 255]
+                    result[region_b] = (1 - alpha) * result[region_b] + alpha * overlay_b[region_b]
+
+                Image.fromarray(result.astype(np.uint8)).save(overlays_dir / img_path.name, quality=90)
+                generated += 1
+            except Exception as e:
+                errors += 1
+                if self.verbose:
+                    print(f"      Overlay error for {img_path.name}: {e}")
+
+        if self.verbose:
+            print(f"   ✅ Overlays generated: {generated} (errors: {errors})")
+            print(f"   📁 {overlays_dir}")
+
+        return {'generated': generated, 'errors': errors}
+
     def collect_dataset_from_results(
         self,
         filter_dir: Path,
         masks_dir: Path
     ) -> Dict:
         """
-        Collect all passed crops and masks into a flat dataset structure.
+        Collect all passed crops and masks into a flat dataset structure
+        with metadata_phase1.json compatible with Qwen2SAM training.
 
         Creates:
             dataset_base_dir/real_texture_boundaries_<date>/images/
             dataset_base_dir/real_texture_boundaries_<date>/masks/
             dataset_base_dir/real_texture_boundaries_<date>/masks_textures/
+            dataset_base_dir/real_texture_boundaries_<date>/metadata_phase1.json
         """
         date_str = datetime.now().strftime("%Y%m%d")
         dataset_name = f"real_texture_boundaries_{date_str}"
@@ -916,6 +1008,15 @@ class IterativeDualGPUPipeline:
         if self.verbose:
             print(f"\n   📁 Dataset directory: {dataset_dir}")
 
+        # Load filter results to get per-crop metadata (texture descriptions, oracle points, etc.)
+        filter_results_path = filter_dir / "entropy_filter_results.json"
+        filter_lookup = {}
+        if filter_results_path.exists():
+            with open(filter_results_path) as f:
+                for entry in json.load(f):
+                    if entry.get('passed'):
+                        filter_lookup[entry['crop_name']] = entry
+
         passed_dir = filter_dir / "passed"
         collected_images = 0
         collected_masks = 0
@@ -924,6 +1025,7 @@ class IterativeDualGPUPipeline:
         skipped_masks = 0
         skipped_masks_a = 0
         skipped_masks_b = 0
+        metadata_entries = []
 
         for category in self.crop_categories:
             category_dir = passed_dir / category
@@ -940,32 +1042,69 @@ class IterativeDualGPUPipeline:
                 collected_images += 1
 
                 mask_name = crop_name.replace('.jpg', '.png').replace('.jpeg', '.png')
+                crop_stem = crop_path.stem
 
+                # Copy boundary mask
                 mask_path = masks_dir / category / mask_name
+                dest_mask = masks_out_dir / mask_name
                 if mask_path.exists():
-                    shutil.copy2(mask_path, masks_out_dir / mask_name)
+                    shutil.copy2(mask_path, dest_mask)
                     collected_masks += 1
                 else:
                     skipped_masks += 1
 
+                # Copy texture masks
                 masks_textures_source_dir = masks_dir.parent / "masks_textures"
 
                 mask_a_name = mask_name.replace('.png', '_mask_a.png')
                 mask_a_path = masks_textures_source_dir / category / mask_a_name
+                dest_mask_a = masks_textures_dir / mask_a_name
                 if mask_a_path.exists():
-                    shutil.copy2(mask_a_path, masks_textures_dir / mask_a_name)
+                    shutil.copy2(mask_a_path, dest_mask_a)
                     collected_masks_a += 1
                 else:
                     skipped_masks_a += 1
 
                 mask_b_name = mask_name.replace('.png', '_mask_b.png')
                 mask_b_path = masks_textures_source_dir / category / mask_b_name
+                dest_mask_b = masks_textures_dir / mask_b_name
                 if mask_b_path.exists():
-                    shutil.copy2(mask_b_path, masks_textures_dir / mask_b_name)
+                    shutil.copy2(mask_b_path, dest_mask_b)
                     collected_masks_b += 1
                 else:
                     skipped_masks_b += 1
 
+                # Build metadata entry (Qwen2SAM format)
+                filter_entry = filter_lookup.get(crop_name, {})
+
+                # Get crop dimensions for coords (full crop = [0, 0, W, H])
+                try:
+                    with Image.open(dest_image) as img:
+                        w, h = img.size
+                except Exception:
+                    w, h = 256, 256
+
+                metadata_entry = {
+                    "image": str(dest_image),
+                    "image_path": str(dest_image),
+                    "mask_path": str(dest_mask),
+                    "mask_a_path": str(dest_mask_a),
+                    "mask_b_path": str(dest_mask_b),
+                    "texture_a": filter_entry.get("texture_a", ""),
+                    "texture_b": filter_entry.get("texture_b", ""),
+                    "description": filter_entry.get("description", ""),
+                    "coords": [0, 0, w, h],
+                    "crop_name": crop_stem,
+                    "oracle_points": filter_entry.get("oracle_points", {}),
+                    "entropy_a": filter_entry.get("entropy_a", 0),
+                    "entropy_b": filter_entry.get("entropy_b", 0),
+                }
+                metadata_entries.append(metadata_entry)
+
+        # Save metadata_phase1.json (Qwen2SAM training format)
+        save_json(metadata_entries, dataset_dir / "metadata_phase1.json")
+
+        # Save dataset info summary
         info = {
             'dataset_name': dataset_name,
             'created': datetime.now().isoformat(),
@@ -982,6 +1121,9 @@ class IterativeDualGPUPipeline:
         }
         save_json(info, dataset_dir / "dataset_info.json")
 
+        # Generate overlay visualizations (texture A=red, B=blue)
+        overlay_stats = self._generate_overlays(dataset_dir)
+
         summary = {
             'dataset_name': dataset_name,
             'dataset_dir': str(dataset_dir),
@@ -991,11 +1133,14 @@ class IterativeDualGPUPipeline:
             'collected_masks_b': collected_masks_b,
             'skipped_masks': skipped_masks,
             'skipped_masks_a': skipped_masks_a,
-            'skipped_masks_b': skipped_masks_b
+            'skipped_masks_b': skipped_masks_b,
+            'metadata_entries': len(metadata_entries),
+            'overlays_generated': overlay_stats['generated'],
         }
 
         if self.verbose:
             print(f"   ✅ Collected {collected_images} images, {collected_masks} masks")
+            print(f"   ✅ metadata_phase1.json: {len(metadata_entries)} entries")
 
         return summary
 

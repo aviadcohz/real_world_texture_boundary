@@ -24,14 +24,11 @@ from pathlib import Path
 from PIL import Image
 from torch.utils.data import Dataset
 
-def _get_mask_utils():
-    """Lazy import to avoid circular dependency with dataset_v2."""
-    from qwen2sam.data.dataset_v2 import (
-        embed_mask_in_canvas,
-        preprocess_image_for_sam3 as preprocess_image_for_sam,
-        resize_mask,
-    )
-    return embed_mask_in_canvas, preprocess_image_for_sam, resize_mask
+from qwen2sam.data.mask_utils import (
+    embed_mask_in_canvas,
+    preprocess_image_for_sam,
+    resize_mask,
+)
 
 
 class Phase3Dataset(Dataset):
@@ -53,9 +50,6 @@ class Phase3Dataset(Dataset):
     ):
         self.data_root = Path(data_root)
         self.image_size = image_size
-
-        # Lazy import to break circular dependency
-        self._embed_mask_in_canvas, self._preprocess_image_for_sam, self._resize_mask = _get_mask_utils()
 
         metadata_path = self.data_root / metadata_file
         with open(metadata_path) as f:
@@ -102,7 +96,7 @@ class Phase3Dataset(Dataset):
         )
 
         # ---- SAM image preprocessing -------------------------------- #
-        sam_image = self._preprocess_image_for_sam(image_np, self.image_size)
+        sam_image = preprocess_image_for_sam(image_np, self.image_size)
 
         # ---- Mask alignment (same as Phase 1) ------------------------ #
         mask_a_raw = cv2.imread(entry["mask_a_path"], cv2.IMREAD_GRAYSCALE)
@@ -112,11 +106,11 @@ class Phase3Dataset(Dataset):
         mask_a_bin = (mask_a_raw > 127).astype(np.float32)
         mask_b_bin = (mask_b_raw > 127).astype(np.float32)
 
-        full_mask_a = self._embed_mask_in_canvas(mask_a_bin, bbox, orig_h, orig_w)
-        full_mask_b = self._embed_mask_in_canvas(mask_b_bin, bbox, orig_h, orig_w)
+        full_mask_a = embed_mask_in_canvas(mask_a_bin, bbox, orig_h, orig_w)
+        full_mask_b = embed_mask_in_canvas(mask_b_bin, bbox, orig_h, orig_w)
 
-        mask_a_sam = self._resize_mask(full_mask_a, self.image_size, self.image_size)
-        mask_b_sam = self._resize_mask(full_mask_b, self.image_size, self.image_size)
+        mask_a_sam = resize_mask(full_mask_a, self.image_size, self.image_size)
+        mask_b_sam = resize_mask(full_mask_b, self.image_size, self.image_size)
 
         return {
             "image": image_pil,
