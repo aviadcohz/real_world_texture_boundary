@@ -34,6 +34,12 @@ from qwen2sam.training.train_phase1 import (
     AverageMeter,
     WarmupCosineScheduler,
 )
+from qwen2sam.training.wandb_utils import (
+    init_wandb, wandb_active, log_step, log_epoch,
+    TextureBoundaryVisualizer, finish_wandb,
+    log_query_diagnostics, log_mask_diagnostics,
+    log_weight_norms, log_loss_ratios, log_learning_health,
+)
 
 
 # -------------------------------------------------------------------- #
@@ -241,7 +247,8 @@ def load_v3_tracker_checkpoint(model, optimizer, scheduler, scaler, path):
 #  Training step                                                         #
 # -------------------------------------------------------------------- #
 
-def train_one_epoch(model, loader, optimizer, scheduler, scaler, cfg, device, epoch):
+def train_one_epoch(model, loader, optimizer, scheduler, scaler, cfg, device, epoch,
+                    global_step=0, visualizer=None, val_collator=None):
     model.base.qwen.train()
     model.base.projector.train()
     model.coord_head.train()
@@ -254,6 +261,7 @@ def train_one_epoch(model, loader, optimizer, scheduler, scaler, cfg, device, ep
     grad_accum = cfg["training"].get("gradient_accumulation_steps", 1)
     max_grad_norm = cfg["training"].get("max_grad_norm", 1.0)
     log_every = cfg.get("logging", {}).get("log_every_n_steps", 10)
+    vis_every = cfg.get("logging", {}).get("vis_every_n_steps", 200)
     loss_cfg = cfg.get("loss", {})
     seg_grad_to_lm = cfg["training"].get("seg_grad_to_lm", False)
 
@@ -335,6 +343,39 @@ def train_one_epoch(model, loader, optimizer, scheduler, scaler, cfg, device, ep
         if "lm_loss" in loss_metrics:
             meters["lm_loss"].update(loss_metrics["lm_loss"], B)
 
+        # ---- W&B step logging ---------------------------------------- #
+        global_step += 1
+        is_grad_step = (step + 1) % grad_accum == 0
+
+        if wandb_active() and is_grad_step:
+            step_metrics = {k: m.val for k, m in meters.items() if m.count > 0}
+            log_step(
+                global_step, step_metrics, optimizer=optimizer,
+                model=model if is_grad_step else None, stage="tracker",
+            )
+            # Advanced diagnostics every 50 grad steps
+            if global_step % 50 == 0:
+                log_query_diagnostics(outputs, global_step)
+                log_mask_diagnostics(outputs, gt_a, gt_b, global_step)
+                log_loss_ratios(step_metrics, global_step)
+            # Weight norms every 200 grad steps
+            if global_step % 200 == 0:
+                log_weight_norms(model, global_step, stage="tracker")
+
+        # ---- Visualization ------------------------------------------- #
+        if (visualizer is not None and val_collator is not None
+                and global_step % vis_every == 0):
+            model.base.qwen.eval()
+            model.base.projector.eval()
+            model.coord_head.eval()
+            visualizer.log_to_wandb(
+                model, val_collator, device, epoch, global_step,
+                stage="tracker", amp_dtype=amp_dtype,
+            )
+            model.base.qwen.train()
+            model.base.projector.train()
+            model.coord_head.train()
+
         if (step + 1) % log_every == 0:
             elapsed = time.time() - t0
             print(
@@ -347,7 +388,7 @@ def train_one_epoch(model, loader, optimizer, scheduler, scaler, cfg, device, ep
                 f"lr={get_lr(optimizer):.2e} ({elapsed:.1f}s)"
             )
 
-    return {k: m.avg for k, m in meters.items()}
+    return {k: m.avg for k, m in meters.items()}, global_step
 
 
 # -------------------------------------------------------------------- #
@@ -552,10 +593,27 @@ def main():
     ckpt_dir = Path(ckpt_cfg.get("dir", "checkpoints/v3_tracker"))
     ckpt_dir.mkdir(parents=True, exist_ok=True)
 
+    # ---- W&B init --------------------------------------------------- #
+    use_wandb = init_wandb(cfg, stage="v3_tracker")
+    if use_wandb:
+        print("  W&B logging enabled")
+
+    # ---- Visualizer -------------------------------------------------- #
+    visualizer = None
+    if use_wandb:
+        vis_cfg = cfg.get("visualization", {})
+        visualizer = TextureBoundaryVisualizer(
+            train_set, val_set,
+            n_train=vis_cfg.get("n_train_samples", 4),
+            n_val=vis_cfg.get("n_val_samples", 4),
+            cell_size=vis_cfg.get("cell_size", 320),
+        )
+
     # ---- Training loop ------------------------------------------------- #
     num_epochs = train_cfg.get("num_epochs", 200)
     best_val_iou = 0.0
     training_history = []
+    global_step = 0
 
     print(f"\n{'='*60}")
     print("Qwen2SAM v3_tracker — Stage 2 Training Start")
@@ -568,8 +626,11 @@ def main():
     for epoch in range(start_epoch, num_epochs):
         t_epoch = time.time()
 
-        train_metrics = train_one_epoch(
-            model, train_loader, optimizer, scheduler, scaler, cfg, device, epoch
+        train_metrics, global_step = train_one_epoch(
+            model, train_loader, optimizer, scheduler, scaler, cfg, device, epoch,
+            global_step=global_step,
+            visualizer=visualizer,
+            val_collator=val_collator,
         )
 
         val_metrics = {}
@@ -592,6 +653,26 @@ def main():
             )
 
         print(f"\nEpoch {epoch+1}/{num_epochs} ({elapsed:.1f}s) | {train_str}{val_str}")
+
+        # W&B epoch logging
+        log_epoch(epoch, train_metrics, val_metrics, best_val_iou, elapsed)
+        log_learning_health(train_metrics, val_metrics, epoch)
+
+        # Epoch-level visualization (every 10 epochs)
+        vis_epoch_every = cfg.get("visualization", {}).get("every_n_epochs", 10)
+        if (visualizer is not None and val_collator is not None
+                and (epoch + 1) % vis_epoch_every == 0):
+            model.base.qwen.eval()
+            model.base.projector.eval()
+            model.coord_head.eval()
+            amp_dtype = get_amp_dtype(cfg)
+            visualizer.log_to_wandb(
+                model, val_collator, device, epoch, global_step,
+                stage="tracker", amp_dtype=amp_dtype,
+            )
+            model.base.qwen.train()
+            model.base.projector.train()
+            model.coord_head.train()
 
         epoch_record = {
             "epoch": epoch + 1,
@@ -628,6 +709,8 @@ def main():
     print(f"Training complete. Best val tracker IoU: {best_val_iou:.4f}")
     print(f"Checkpoints: {ckpt_dir}")
     print(f"{'='*60}")
+
+    finish_wandb()
 
 
 if __name__ == "__main__":
