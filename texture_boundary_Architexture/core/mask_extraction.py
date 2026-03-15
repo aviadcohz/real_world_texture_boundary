@@ -230,6 +230,60 @@ def extract_binary_mask(
     return result
 
 
+def compute_shared_boundary(
+    mask_a: np.ndarray,
+    mask_b: np.ndarray,
+    dilation_px: int = 5,
+) -> Tuple[int, int, float]:
+    """Measure the shared boundary between two masks.
+
+    Dilates mask_b and checks how much of mask_a's perimeter is adjacent to it
+    (and vice versa). Returns the boundary length and the ratio relative to the
+    smaller mask's perimeter.
+
+    Args:
+        mask_a: Boolean array (H, W).
+        mask_b: Boolean array (H, W).
+        dilation_px: Pixels to dilate when checking adjacency (gap tolerance).
+
+    Returns:
+        (shared_boundary_pixels, smaller_perimeter_pixels, shared_ratio)
+    """
+    kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE,
+                                       (2 * dilation_px + 1, 2 * dilation_px + 1))
+
+    # Perimeter of mask_a: pixels in mask_a that border non-mask_a
+    edge_kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3))
+    perim_a = cv2.dilate(mask_a.astype(np.uint8), edge_kernel) - mask_a.astype(np.uint8)
+    perim_a = (perim_a > 0) & mask_a  # inner edge pixels
+    # Actually compute inner perimeter: erode and subtract
+    eroded_a = cv2.erode(mask_a.astype(np.uint8), edge_kernel)
+    perim_a = mask_a.astype(np.uint8) - eroded_a
+    perim_a_count = int(perim_a.sum())
+
+    eroded_b = cv2.erode(mask_b.astype(np.uint8), edge_kernel)
+    perim_b = mask_b.astype(np.uint8) - eroded_b
+    perim_b_count = int(perim_b.sum())
+
+    smaller_perim = min(perim_a_count, perim_b_count)
+    if smaller_perim == 0:
+        return 0, 0, 0.0
+
+    # Dilate mask_b, then count how many perimeter pixels of mask_a are adjacent
+    dilated_b = cv2.dilate(mask_b.astype(np.uint8), kernel)
+    shared_from_a = int((perim_a & dilated_b).sum())
+
+    # Dilate mask_a, then count how many perimeter pixels of mask_b are adjacent
+    dilated_a = cv2.dilate(mask_a.astype(np.uint8), kernel)
+    shared_from_b = int((perim_b & dilated_a).sum())
+
+    # Use the maximum of both directions (asymmetric shapes)
+    shared_boundary = max(shared_from_a, shared_from_b)
+    shared_ratio = shared_boundary / smaller_perim
+
+    return shared_boundary, smaller_perim, shared_ratio
+
+
 def validate_mask_pair(
     mask_a: np.ndarray,
     mask_b: np.ndarray,
@@ -237,6 +291,8 @@ def validate_mask_pair(
     max_overlap_ratio: float = 0.15,
     min_area_fraction: float = 0.01,
     max_area_ratio: float = 20.0,
+    min_boundary_ratio: float = 0.10,
+    boundary_dilation_px: int = 5,
 ) -> Tuple[bool, str]:
     """Validate a pair of extracted binary masks.
 
@@ -247,6 +303,10 @@ def validate_mask_pair(
         max_overlap_ratio: Maximum allowed overlap as fraction of smaller mask.
         min_area_fraction: Each mask must cover at least this fraction of the image.
         max_area_ratio: Maximum ratio between larger and smaller mask areas.
+        min_boundary_ratio: Minimum fraction of the smaller mask's perimeter that
+            must be adjacent to the other mask. Rejects pairs that don't share
+            a significant boundary (e.g., masks on opposite sides of the image).
+        boundary_dilation_px: Pixel gap tolerance when checking adjacency.
 
     Returns:
         (is_valid, reason_if_invalid)
@@ -277,6 +337,17 @@ def validate_mask_pair(
     min_count = min(count_a, count_b)
     if min_count > 0 and overlap / min_count > max_overlap_ratio:
         return False, f"masks overlap too much ({overlap/min_count:.1%})"
+
+    # Check that the two masks share a significant boundary
+    shared_px, smaller_perim, shared_ratio = compute_shared_boundary(
+        mask_a, mask_b, dilation_px=boundary_dilation_px
+    )
+    if shared_ratio < min_boundary_ratio:
+        return False, (
+            f"masks don't share a significant boundary "
+            f"({shared_ratio:.1%} of perimeter, need {min_boundary_ratio:.0%}; "
+            f"{shared_px} shared pixels out of {smaller_perim} perimeter)"
+        )
 
     return True, ""
 

@@ -25,12 +25,20 @@ RULES — what to INCLUDE:
 - Every transition between two different surface materials or patterns that physically touch
 - Examples: grass meets gravel path, stone wall meets plaster, water meets sand, brick meets concrete, dirt meets vegetation
 
+CRITICAL ADJACENCY RULE:
+The two textures MUST physically share a clear, significant boundary — they must directly touch each other along a substantial edge. Do NOT pair textures that are separated by other regions, objects, or empty space. For example:
+- BAD: left fence and right fence separated by a path — they never touch
+- BAD: water at the top and sand at the bottom separated by trees in the middle
+- GOOD: grass directly meets a gravel path along a clear edge
+- GOOD: a wooden surface directly meets a fabric surface where they touch
+
 RULES — what to EXCLUDE:
 - Sky. Sky is NEVER a texture. Never include any color that represents sky.
 - Object boundaries (person, car, furniture silhouettes)
-- Regions that are NOT adjacent (they must share a border in the mask)
+- Regions that are NOT adjacent (they must share a LONG, SIGNIFICANT border in the mask — not just a few corner pixels touching)
 - Tiny regions (less than ~5% of the image)
 - Same material with only lighting/shadow difference
+- Texture pairs where the shared boundary is very short or fragmented compared to the overall region size
 
 STEP 3 — DESCRIBE EACH TEXTURE:
 For each texture, describe the ACTUAL surface you see in the PHOTO at that color's location.
