@@ -30,7 +30,11 @@ from texture_boundary_Architexture.core.mask_extraction import (
     validate_mask_pair,
 )
 from texture_boundary_Architexture.core.deduplication import is_duplicate_transition
-from texture_boundary_Architexture.core.visualization import save_transition_visualizations
+from texture_boundary_Architexture.core.transition_cropper import clean_mask, find_best_crops, refine_crop_masks
+from texture_boundary_Architexture.core.visualization import (
+    create_transition_overlay,
+    save_transition_visualizations,
+)
 
 
 def parse_qwen_response(response: str) -> list:
@@ -94,6 +98,7 @@ def process_image(
     exp_dir: Path,
     sample_index: int,
     visualize: bool = True,
+    crop_transitions: bool = True,
 ) -> list:
     """Process a single image: Qwen analysis + mask extraction + full metadata.
 
@@ -104,6 +109,7 @@ def process_image(
         exp_dir: Experiment output directory.
         sample_index: Starting index for naming samples.
         visualize: Whether to generate overlay visualizations.
+        crop_transitions: Whether to extract tight boundary crops.
 
     Returns list of RWTD-format metadata dicts for valid transitions.
     """
@@ -158,7 +164,13 @@ def process_image(
     masks_dir = exp_dir / "masks"
     viz_dir = exp_dir / "visualizations"
     overlays_dir = exp_dir / "overlays"
-    for d in [images_dir, masks_texture_dir, masks_dir, viz_dir, overlays_dir]:
+    crops_images_dir = exp_dir / "crops" / "images"
+    crops_masks_dir = exp_dir / "crops" / "masks_texture"
+    crops_viz_dir = exp_dir / "crops" / "visualizations"
+    dirs = [images_dir, masks_texture_dir, masks_dir, viz_dir, overlays_dir]
+    if crop_transitions:
+        dirs.extend([crops_images_dir, crops_masks_dir, crops_viz_dir])
+    for d in dirs:
         d.mkdir(parents=True, exist_ok=True)
 
     h, w = mask_array.shape[:2]
@@ -252,7 +264,72 @@ def process_image(
             "crop_name": crop_name,
             "coords": [0, 0, w, h],
             "source_image_id": image_id,
+            "crops": [],
         }
+
+        # Extract tight boundary crops with color-based refinement
+        if crop_transitions:
+            src_img_array = np.array(Image.open(src_image).convert("RGB"))
+            crops = find_best_crops(mask_a, mask_b, image=src_img_array)
+            if crops:
+                crop_details = []
+                for j, (cy1, cx1, cy2, cx2, score, _, _) in enumerate(crops):
+                    # Crop image and masks, clean before refinement
+                    crop_img_arr = src_img_array[cy1:cy2, cx1:cx2]
+                    crop_ma = clean_mask(mask_a[cy1:cy2, cx1:cx2])
+                    crop_mb = clean_mask(mask_b[cy1:cy2, cx1:cx2])
+
+                    # Refine: assign third-class pixels to nearest texture
+                    crop_ma, crop_mb = refine_crop_masks(
+                        crop_img_arr, crop_ma, crop_mb, max_distance=40.0
+                    )
+
+                    # Clean again after refinement to remove scattered pixels
+                    crop_ma = clean_mask(crop_ma)
+                    crop_mb = clean_mask(crop_mb)
+
+                    # Save cropped files
+                    crop_img_path = crops_images_dir / f"{crop_name}_crop{j}.jpg"
+                    crop_ma_path = crops_masks_dir / f"{crop_name}_crop{j}_mask_a.png"
+                    crop_mb_path = crops_masks_dir / f"{crop_name}_crop{j}_mask_b.png"
+                    Image.fromarray(crop_img_arr).save(str(crop_img_path), quality=95)
+                    Image.fromarray((crop_ma.astype(np.uint8) * 255)).save(str(crop_ma_path))
+                    Image.fromarray((crop_mb.astype(np.uint8) * 255)).save(str(crop_mb_path))
+
+                    # Save visualization overlay (no labels — crops are small)
+                    overlay = create_transition_overlay(
+                        crop_img_arr, crop_ma, crop_mb,
+                        t["texture_a"], t["texture_b"],
+                        show_labels=False,
+                    )
+                    crop_viz_path = crops_viz_dir / f"{crop_name}_crop{j}.jpg"
+                    overlay.save(str(crop_viz_path), quality=92)
+
+                    # Oracle points for refined cropped masks
+                    crop_pts_a = sample_oracle_points(crop_ma, n_points=4)
+                    crop_pts_b = sample_oracle_points(crop_mb, n_points=4)
+
+                    # Final balance after refinement
+                    area = crop_ma.size
+                    final_frac_a = round(float(crop_ma.sum()) / area, 3)
+                    final_frac_b = round(float(crop_mb.sum()) / area, 3)
+
+                    crop_details.append({
+                        "crop_index": j,
+                        "box": [int(cy1), int(cx1), int(cy2), int(cx2)],
+                        "score": round(float(score), 6),
+                        "crop_image_path": str(crop_img_path.resolve()),
+                        "crop_mask_a_path": str(crop_ma_path.resolve()),
+                        "crop_mask_b_path": str(crop_mb_path.resolve()),
+                        "crop_size": [int(cx2 - cx1), int(cy2 - cy1)],
+                        "balance": [final_frac_a, final_frac_b],
+                        "oracle_points": {
+                            "point_prompt_mask_a": crop_pts_a,
+                            "point_prompt_mask_b": crop_pts_b,
+                        },
+                    })
+                entry["crops"] = crop_details
+
         metadata_entries.append(entry)
 
         viz_transitions.append({
@@ -276,6 +353,7 @@ def run_pipeline(
     max_images: int = None,
     skip_existing: bool = True,
     visualize: bool = True,
+    crop_transitions: bool = True,
     device: str = "cuda",
 ):
     """Run the full texture transition extraction pipeline.
@@ -287,6 +365,7 @@ def run_pipeline(
         max_images: Process only first N images (for testing).
         skip_existing: Skip images that already have results.
         visualize: Generate overlay visualizations.
+        crop_transitions: Extract tight boundary crops.
         device: CUDA device.
     """
     data_dir = Path(data_dir)
@@ -354,6 +433,7 @@ def run_pipeline(
         entries = process_image(
             model, image_id, data_dir, exp_dir,
             sample_index=len(all_metadata), visualize=visualize,
+            crop_transitions=crop_transitions,
         )
 
         if entries:
@@ -410,6 +490,7 @@ def run_pipeline(
     print(f"  {exp_dir}/masks_texture/         <- binary masks (mask_a, mask_b)")
     print(f"  {exp_dir}/visualizations/        <- overlay visualizations")
     print(f"  {exp_dir}/overlays/              <- original overlays from Detecture")
+    print(f"  {exp_dir}/crops/                 <- tight boundary crops (image + masks)")
 
 
 if __name__ == "__main__":
@@ -417,11 +498,12 @@ if __name__ == "__main__":
     parser.add_argument("--data-dir", default="/home/aviad/detecture_data")
     parser.add_argument("--output-dir", default="/datasets/ade20k/",
                         help="Base output dir (default: /home/aviad/detecture_experiments)")
-    parser.add_argument("--exp-name", default="Detecture_dataset",
+    parser.add_argument("--exp-name", default="testing_boundary",#"Detecture_dataset",
                         help="Experiment name (default: exp_TIMESTAMP)")
-    parser.add_argument("--max-images", type=int, default=None)
+    parser.add_argument("--max-images", type=int, default=30)
     parser.add_argument("--no-skip", action="store_true", help="Don't skip existing results")
     parser.add_argument("--no-viz", action="store_true", help="Skip visualization generation")
+    parser.add_argument("--no-crop", action="store_true", help="Skip boundary crop extraction")
     parser.add_argument("--device", default="cuda")
     args = parser.parse_args()
 
@@ -432,5 +514,6 @@ if __name__ == "__main__":
         max_images=args.max_images,
         skip_existing=not args.no_skip,
         visualize=not args.no_viz,
+        crop_transitions=not args.no_crop,
         device=args.device,
     )

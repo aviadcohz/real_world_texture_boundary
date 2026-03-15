@@ -16,6 +16,7 @@ def create_transition_overlay(
     alpha: float = 0.4,
     color_a: Tuple[int, int, int] = (255, 50, 50),
     color_b: Tuple[int, int, int] = (50, 100, 255),
+    show_labels: bool = True,
 ) -> Image.Image:
     """Create an overlay showing mask_a (red) and mask_b (blue) on the original image.
 
@@ -28,9 +29,10 @@ def create_transition_overlay(
         alpha: Blending strength for mask overlay.
         color_a: RGB color for texture A overlay.
         color_b: RGB color for texture B overlay.
+        show_labels: Whether to draw text labels on the overlay.
 
     Returns:
-        PIL Image with overlay and labels.
+        PIL Image with overlay and optionally labels.
     """
     overlay = image.astype(np.float32).copy()
 
@@ -51,27 +53,27 @@ def create_transition_overlay(
     boundary = dilated_a & dilated_b & ~(mask_a & mask_b)
     overlay[boundary] = [255, 255, 0]  # yellow boundary
 
-    # Convert to PIL and add text labels
+    # Convert to PIL and optionally add text labels
     pil_img = Image.fromarray(overlay)
-    draw = ImageDraw.Draw(pil_img)
 
-    # Try to use a readable font, fall back to default
-    try:
-        font = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf", 14)
-    except (IOError, OSError):
-        font = ImageFont.load_default()
+    if show_labels:
+        draw = ImageDraw.Draw(pil_img)
 
-    h = pil_img.height
+        # Try to use a readable font, fall back to default
+        try:
+            font = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf", 14)
+        except (IOError, OSError):
+            font = ImageFont.load_default()
 
-    # Draw labels with background
-    labels = [
-        (f"A: {texture_a_desc}", color_a, 5),
-        (f"B: {texture_b_desc}", color_b, 22),
-    ]
-    for text, color, y_pos in labels:
-        bbox = draw.textbbox((5, y_pos), text, font=font)
-        draw.rectangle([bbox[0] - 2, bbox[1] - 1, bbox[2] + 2, bbox[3] + 1], fill=(0, 0, 0))
-        draw.text((5, y_pos), text, fill=color, font=font)
+        # Draw labels with background
+        labels = [
+            (f"A: {texture_a_desc}", color_a, 5),
+            (f"B: {texture_b_desc}", color_b, 22),
+        ]
+        for text, color, y_pos in labels:
+            bbox = draw.textbbox((5, y_pos), text, font=font)
+            draw.rectangle([bbox[0] - 2, bbox[1] - 1, bbox[2] + 2, bbox[3] + 1], fill=(0, 0, 0))
+            draw.text((5, y_pos), text, fill=color, font=font)
 
     return pil_img
 
