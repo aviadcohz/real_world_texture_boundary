@@ -24,6 +24,7 @@ from texture_boundary_Architexture.core.mask_extraction import (
     extract_binary_mask,
     find_dominant_colors,
     format_dominant_colors,
+    keep_adjacent_components,
     quantize_mask,
     sample_oracle_points,
     validate_mask_pair,
@@ -175,6 +176,11 @@ def process_image(
                                      quantized_labels=quantized_labels)
         mask_b = extract_binary_mask(mask_array, t["colors_b"], dominant_colors,
                                      quantized_labels=quantized_labels)
+
+        # Filter out disconnected components (e.g., sky sharing a color with grass)
+        # Keep only components of each mask that are adjacent to the other mask
+        mask_a = keep_adjacent_components(mask_a, mask_b)
+        mask_b = keep_adjacent_components(mask_b, mask_a)
 
         valid, reason = validate_mask_pair(mask_a, mask_b)
         if not valid:

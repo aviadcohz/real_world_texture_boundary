@@ -1,6 +1,6 @@
 """Extract binary masks from colored annotation masks by RGB color matching."""
 
-from typing import List, Tuple, Optional
+from typing import List, Tuple, Optional  # noqa: F401
 
 import cv2
 import numpy as np
@@ -226,6 +226,65 @@ def extract_binary_mask(
         kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3))
         closed = cv2.morphologyEx(result.astype(np.uint8), cv2.MORPH_CLOSE, kernel)
         result = closed.astype(bool)
+
+    return result
+
+
+def keep_adjacent_components(
+    mask: np.ndarray,
+    other_mask: np.ndarray,
+    adjacency_dilation_px: int = 10,
+    min_component_fraction: float = 0.005,
+) -> np.ndarray:
+    """Keep only connected components of `mask` that are adjacent to `other_mask`.
+
+    Solves the color-collision problem where a single mask color maps to
+    disconnected regions (e.g., sky and grass share the same green in the
+    segmentation mask). Only the components near the other texture are kept.
+
+    Args:
+        mask: Boolean array (H, W) — the mask to filter.
+        other_mask: Boolean array (H, W) — the reference mask.
+        adjacency_dilation_px: How far to dilate other_mask when checking proximity.
+        min_component_fraction: Minimum fraction of the total mask area for a
+            component to be considered (filters JPEG boundary artifacts).
+
+    Returns:
+        Filtered boolean array (H, W) with only adjacent components.
+    """
+    if not mask.any() or not other_mask.any():
+        return mask
+
+    # Find connected components in mask
+    num_labels, labels = cv2.connectedComponents(mask.astype(np.uint8))
+    if num_labels <= 1:
+        return mask
+
+    total_mask_pixels = int(mask.sum())
+    min_component_size = max(50, int(total_mask_pixels * min_component_fraction))
+
+    # Dilate the other mask to create an adjacency zone
+    kernel = cv2.getStructuringElement(
+        cv2.MORPH_ELLIPSE,
+        (2 * adjacency_dilation_px + 1, 2 * adjacency_dilation_px + 1),
+    )
+    other_dilated = cv2.dilate(other_mask.astype(np.uint8), kernel)
+
+    # Keep components that are large enough AND overlap the adjacency zone
+    result = np.zeros_like(mask)
+    for label_id in range(1, num_labels):
+        component = labels == label_id
+        component_size = int(component.sum())
+        if component_size < min_component_size:
+            continue
+        if (component & other_dilated.astype(bool)).any():
+            result |= component
+
+    # If no component is adjacent, fall back to the largest component
+    if not result.any():
+        sizes = [(labels == i).sum() for i in range(1, num_labels)]
+        largest = np.argmax(sizes) + 1
+        result = labels == largest
 
     return result
 
