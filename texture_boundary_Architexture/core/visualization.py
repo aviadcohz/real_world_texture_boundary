@@ -44,14 +44,14 @@ def create_transition_overlay(
 
     overlay = np.clip(overlay, 0, 255).astype(np.uint8)
 
-    # Draw boundary between the two masks (where they are adjacent)
-    # Dilate both masks slightly and find intersection = boundary zone
+    # Draw boundary: use edge of mask_a (works whether masks are complementary or have gaps)
     import cv2
-    kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5))
-    dilated_a = cv2.dilate(mask_a.astype(np.uint8), kernel, iterations=1).astype(bool)
-    dilated_b = cv2.dilate(mask_b.astype(np.uint8), kernel, iterations=1).astype(bool)
-    boundary = dilated_a & dilated_b & ~(mask_a & mask_b)
-    overlay[boundary] = [255, 255, 0]  # yellow boundary
+    edge_kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3))
+    eroded_a = cv2.erode(mask_a.astype(np.uint8), edge_kernel)
+    boundary = mask_a.astype(np.uint8) - eroded_a
+    # Thicken to 2-3px for visibility
+    boundary = cv2.dilate(boundary, edge_kernel, iterations=1)
+    overlay[boundary > 0] = [255, 255, 0]  # yellow boundary
 
     # Convert to PIL and optionally add text labels
     pil_img = Image.fromarray(overlay)

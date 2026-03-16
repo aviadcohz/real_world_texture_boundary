@@ -31,6 +31,7 @@ from texture_boundary_Architexture.core.mask_extraction import (
 )
 from texture_boundary_Architexture.core.deduplication import is_duplicate_transition
 from texture_boundary_Architexture.core.transition_cropper import clean_mask, find_best_crops, refine_crop_masks
+from texture_boundary_Architexture.core.texture_refiner_pipeline import TextureRefinerPipeline
 from texture_boundary_Architexture.core.visualization import (
     create_transition_overlay,
     save_transition_visualizations,
@@ -91,6 +92,33 @@ def parse_qwen_response(response: str) -> list:
     return valid
 
 
+def _nms_crop_boxes(boxes, scores, iou_threshold=0.60):
+    """Non-maximum suppression across crop boxes. Keep higher-scoring crop when IoU > threshold."""
+    if not boxes:
+        return []
+    order = sorted(range(len(scores)), key=lambda i: scores[i], reverse=True)
+    keep = []
+    suppressed = set()
+    for i in order:
+        if i in suppressed:
+            continue
+        keep.append(i)
+        y1_i, x1_i, y2_i, x2_i = boxes[i]
+        area_i = (y2_i - y1_i) * (x2_i - x1_i)
+        for j in order:
+            if j in suppressed or j == i:
+                continue
+            y1_j, x1_j, y2_j, x2_j = boxes[j]
+            area_j = (y2_j - y1_j) * (x2_j - x1_j)
+            iy1, ix1 = max(y1_i, y1_j), max(x1_i, x1_j)
+            iy2, ix2 = min(y2_i, y2_j), min(x2_i, x2_j)
+            inter = max(0, iy2 - iy1) * max(0, ix2 - ix1)
+            union = area_i + area_j - inter
+            if union > 0 and inter / union > iou_threshold:
+                suppressed.add(j)
+    return keep
+
+
 def process_image(
     model,
     image_id: str,
@@ -99,6 +127,7 @@ def process_image(
     sample_index: int,
     visualize: bool = True,
     crop_transitions: bool = True,
+    refiner: TextureRefinerPipeline = None,
 ) -> list:
     """Process a single image: Qwen analysis + mask extraction + full metadata.
 
@@ -167,9 +196,14 @@ def process_image(
     crops_images_dir = exp_dir / "crops" / "images"
     crops_masks_dir = exp_dir / "crops" / "masks_texture"
     crops_viz_dir = exp_dir / "crops" / "visualizations"
+    refined_images_dir = exp_dir / "crops" / "refined" / "images"
+    refined_masks_dir = exp_dir / "crops" / "refined" / "masks_texture"
+    refined_viz_dir = exp_dir / "crops" / "refined" / "visualizations"
     dirs = [images_dir, masks_texture_dir, masks_dir, viz_dir, overlays_dir]
     if crop_transitions:
         dirs.extend([crops_images_dir, crops_masks_dir, crops_viz_dir])
+        if refiner is not None:
+            dirs.extend([refined_images_dir, refined_masks_dir, refined_viz_dir])
     for d in dirs:
         d.mkdir(parents=True, exist_ok=True)
 
@@ -273,7 +307,13 @@ def process_image(
             crops = find_best_crops(mask_a, mask_b, image=src_img_array)
             if crops:
                 crop_details = []
+                MIN_CROP_SIDE = 64
                 for j, (cy1, cx1, cy2, cx2, score, _, _) in enumerate(crops):
+                    # Skip crops smaller than minimum size
+                    crop_h, crop_w = cy2 - cy1, cx2 - cx1
+                    if min(crop_h, crop_w) < MIN_CROP_SIDE:
+                        continue
+
                     # Crop image and masks, clean before refinement
                     crop_img_arr = src_img_array[cy1:cy2, cx1:cx2]
                     crop_ma = clean_mask(mask_a[cy1:cy2, cx1:cx2])
@@ -295,6 +335,39 @@ def process_image(
                     Image.fromarray(crop_img_arr).save(str(crop_img_path), quality=95)
                     Image.fromarray((crop_ma.astype(np.uint8) * 255)).save(str(crop_ma_path))
                     Image.fromarray((crop_mb.astype(np.uint8) * 255)).save(str(crop_mb_path))
+
+                    # SR refinement: upscale crop + smooth masks
+                    refined_info = {}
+                    if refiner is not None:
+                        result = refiner.process_crop(
+                            crop_img_arr,
+                            crop_ma.astype(np.uint8) * 255,
+                            crop_mb.astype(np.uint8) * 255,
+                        )
+                        ref_img_path = refined_images_dir / f"{crop_name}_crop{j}.png"
+                        ref_ma_path = refined_masks_dir / f"{crop_name}_crop{j}_mask_a.png"
+                        ref_mb_path = refined_masks_dir / f"{crop_name}_crop{j}_mask_b.png"
+                        result["image"].save(str(ref_img_path))
+                        Image.fromarray(result["mask_a"]).save(str(ref_ma_path))
+                        Image.fromarray(result["mask_b"]).save(str(ref_mb_path))
+                        refined_info = {
+                            "refined_image_path": str(ref_img_path.resolve()),
+                            "refined_mask_a_path": str(ref_ma_path.resolve()),
+                            "refined_mask_b_path": str(ref_mb_path.resolve()),
+                            "scale_factor": result["scale_factor"],
+                            "refined_size": list(result["sr_size"]),
+                        }
+                        # Refined visualization overlay
+                        ref_rgb = np.array(result["image"])
+                        ref_ma_bool = result["mask_a"] > 127
+                        ref_mb_bool = result["mask_b"] > 127
+                        ref_overlay = create_transition_overlay(
+                            ref_rgb, ref_ma_bool, ref_mb_bool,
+                            t["texture_a"], t["texture_b"],
+                            show_labels=False,
+                        )
+                        ref_viz_path = refined_viz_dir / f"{crop_name}_crop{j}.jpg"
+                        ref_overlay.save(str(ref_viz_path), quality=92)
 
                     # Save visualization overlay (no labels — crops are small)
                     overlay = create_transition_overlay(
@@ -327,6 +400,7 @@ def process_image(
                             "point_prompt_mask_a": crop_pts_a,
                             "point_prompt_mask_b": crop_pts_b,
                         },
+                        **refined_info,
                     })
                 entry["crops"] = crop_details
 
@@ -339,11 +413,212 @@ def process_image(
             "texture_b": t["texture_b"],
         })
 
+    # Deduplicate crops across transitions within this image
+    # Crops from different transitions can overlap heavily (e.g., sand/stone and sand/water
+    # transitions share the same boundary region). Remove duplicates by box IoU.
+    if crop_transitions and len(metadata_entries) > 1:
+        all_crops = []  # (transition_idx, crop_idx_in_list, box, score)
+        for t_idx, entry in enumerate(metadata_entries):
+            for c_idx, crop in enumerate(entry.get("crops", [])):
+                box = tuple(crop["box"])  # (y1, x1, y2, x2)
+                all_crops.append((t_idx, c_idx, box, crop["score"]))
+
+        if len(all_crops) > 1:
+            boxes = [c[2] for c in all_crops]
+            scores = [c[3] for c in all_crops]
+            keep_indices = _nms_crop_boxes(boxes, scores, iou_threshold=0.60)
+            keep_set = set(keep_indices)
+
+            n_before = len(all_crops)
+            # Rebuild crop lists, keeping only non-suppressed crops
+            for t_idx, entry in enumerate(metadata_entries):
+                kept = []
+                for c_idx, crop in enumerate(entry.get("crops", [])):
+                    # Find this crop's index in all_crops
+                    global_idx = next(
+                        i for i, (ti, ci, _, _) in enumerate(all_crops)
+                        if ti == t_idx and ci == c_idx
+                    )
+                    if global_idx in keep_set:
+                        kept.append(crop)
+                entry["crops"] = kept
+
+            n_after = sum(len(e.get("crops", [])) for e in metadata_entries)
+            if n_before > n_after:
+                print(f"  Deduped crops: {n_before} → {n_after} (removed {n_before - n_after} overlapping)")
+
     # Save visualizations
     if visualize and viz_transitions:
         save_transition_visualizations(str(src_image), viz_transitions, str(viz_dir), image_id)
 
     return metadata_entries
+
+
+def _print_pipeline_summary(stats, crop_metadata, all_metadata, exp_dir, elapsed):
+    """Print comprehensive pipeline statistics with crop size distributions."""
+    print(f"\n{'='*60}")
+    print(f"  PIPELINE COMPLETE")
+    print(f"{'='*60}")
+    print(f"  Experiment:  {exp_dir}")
+    print(f"  Time:        {elapsed:.0f}s")
+    print(f"{'='*60}")
+
+    # --- Image-level stats ---
+    print(f"\n--- Images ---")
+    print(f"  Processed:       {stats['processed']}")
+    print(f"  Skipped (exist): {stats['skipped_existing']}")
+    print(f"  Failed:          {stats['failed']}")
+    print(f"  Transitions:     {stats['total_transitions']}")
+
+    # --- Original image size distribution ---
+    if all_metadata:
+        seen_images = {}
+        for e in all_metadata:
+            sid = e.get("source_image_id", "")
+            if sid not in seen_images:
+                coords = e.get("coords", [0, 0, 0, 0])
+                seen_images[sid] = (coords[2], coords[3])  # w, h
+
+        if seen_images:
+            widths = [w for w, h in seen_images.values() if w > 0]
+            heights = [h for w, h in seen_images.values() if h > 0]
+            if widths:
+                print(f"\n--- Original Image Sizes ({len(seen_images)} unique images) ---")
+                min_sides = [min(w, h) for w, h in seen_images.values() if w > 0]
+                max_sides = [max(w, h) for w, h in seen_images.values() if w > 0]
+                # Size buckets
+                buckets = [(0, 256), (256, 512), (512, 1024), (1024, 2048), (2048, 9999)]
+                labels = ["<256", "256-512", "512-1K", "1K-2K", "2K+"]
+                for (lo, hi), label in zip(buckets, labels):
+                    count = sum(1 for s in min_sides if lo <= s < hi)
+                    if count > 0:
+                        pct = count / len(min_sides) * 100
+                        bar = "#" * int(pct / 2)
+                        print(f"  {label:>8}px: {count:>5} ({pct:5.1f}%) {bar}")
+                print(f"  Mean:  {sum(widths)/len(widths):.0f}x{sum(heights)/len(heights):.0f}")
+                sorted_w = sorted(widths)
+                sorted_h = sorted(heights)
+                print(f"  Median: {sorted_w[len(sorted_w)//2]}x{sorted_h[len(sorted_h)//2]}")
+                print(f"  Range:  {min(widths)}x{min(heights)} — {max(widths)}x{max(heights)}")
+
+    if not crop_metadata:
+        print(f"\n  No crops extracted.")
+        return
+
+    # --- Crop-level stats ---
+    total_crops = len(crop_metadata)
+    refined_crops = [c for c in crop_metadata if "refined_image_path" in c]
+    n_refined = len(refined_crops)
+
+    print(f"\n--- Crops ---")
+    print(f"  Total crops (>=64px min side): {total_crops}")
+    print(f"  Refined (SR applied):          {n_refined}")
+
+    # Count how many transitions have at least one crop
+    transitions_with_crops = sum(
+        1 for e in all_metadata if len(e.get("crops", [])) > 0
+    )
+    transitions_no_crops = len(all_metadata) - transitions_with_crops
+    print(f"  Transitions with crops:        {transitions_with_crops}")
+    print(f"  Transitions without crops:     {transitions_no_crops} (all crops <64px)")
+
+    # --- Input size distribution ---
+    input_sizes = []
+    for c in crop_metadata:
+        w, h = c["coords"][2], c["coords"][3]
+        if w > 0 and h > 0:
+            input_sizes.append((w, h))
+
+    if input_sizes:
+        min_sides = [min(w, h) for w, h in input_sizes]
+        max_sides = [max(w, h) for w, h in input_sizes]
+
+        print(f"\n--- Input Crop Size Distribution (min side) ---")
+        buckets = [(64, 96), (96, 128), (128, 192), (192, 256), (256, 512)]
+        for lo, hi in buckets:
+            count = sum(1 for s in min_sides if lo <= s < hi)
+            pct = count / len(min_sides) * 100
+            bar = "#" * int(pct / 2)
+            print(f"  {lo:>4}-{hi:<4}px: {count:>5} ({pct:5.1f}%) {bar}")
+
+        avg_min = sum(min_sides) / len(min_sides)
+        print(f"  Mean min side: {avg_min:.0f}px")
+        sorted_min = sorted(min_sides)
+        print(f"  Median:        {sorted_min[len(sorted_min)//2]}px")
+        print(f"  Range:         {min(min_sides)}-{max(min_sides)}px")
+
+    # --- Refined output size distribution ---
+    if refined_crops:
+        ref_sizes = [c["refined_size"] for c in refined_crops]
+        ref_min_sides = [min(h, w) for h, w in ref_sizes]
+        scale_factors = [c["scale_factor"] for c in refined_crops]
+
+        print(f"\n--- Refined Output Size Distribution (min side) ---")
+        buckets_ref = [(64, 128), (128, 256), (256, 384), (384, 512), (512, 1024)]
+        for lo, hi in buckets_ref:
+            count = sum(1 for s in ref_min_sides if lo <= s < hi)
+            pct = count / len(ref_min_sides) * 100
+            bar = "#" * int(pct / 2)
+            print(f"  {lo:>4}-{hi:<4}px: {count:>5} ({pct:5.1f}%) {bar}")
+
+        avg_ref = sum(ref_min_sides) / len(ref_min_sides)
+        print(f"  Mean min side: {avg_ref:.0f}px")
+        sorted_ref = sorted(ref_min_sides)
+        print(f"  Median:        {sorted_ref[len(sorted_ref)//2]}px")
+        print(f"  Range:         {min(ref_min_sides)}-{max(ref_min_sides)}px")
+
+        # Scale factor breakdown
+        print(f"\n--- Scale Factors ---")
+        from collections import Counter
+        scale_counts = Counter(scale_factors)
+        for scale in sorted(scale_counts):
+            count = scale_counts[scale]
+            pct = count / len(scale_factors) * 100
+            print(f"  {scale}x: {count:>5} ({pct:5.1f}%)")
+
+        # Input → Output size flow
+        print(f"\n--- Size Flow (input → refined) ---")
+        flow_buckets = {}
+        for c in refined_crops:
+            in_w, in_h = c["coords"][2], c["coords"][3]
+            in_min = min(in_w, in_h) if in_w > 0 and in_h > 0 else 0
+            out_h, out_w = c["refined_size"]
+            out_min = min(out_h, out_w)
+
+            # Bucket input
+            for lo, hi in [(64, 96), (96, 128), (128, 192), (192, 256), (256, 512)]:
+                if lo <= in_min < hi:
+                    key = f"{lo}-{hi}px"
+                    if key not in flow_buckets:
+                        flow_buckets[key] = []
+                    flow_buckets[key].append(out_min)
+                    break
+
+        for bucket in sorted(flow_buckets):
+            outs = flow_buckets[bucket]
+            avg_out = sum(outs) / len(outs)
+            print(f"  {bucket:>10} ({len(outs):>4} crops) → avg {avg_out:.0f}px refined")
+
+    # --- Output structure ---
+    print(f"\n--- Output Structure ---")
+    print(f"  {exp_dir}/metadata.json")
+    print(f"  {exp_dir}/crops/metadata.json       ({total_crops} crops)")
+    if n_refined:
+        print(f"  {exp_dir}/crops/refined/images/     ({n_refined} refined)")
+        print(f"  {exp_dir}/crops/refined/visualizations/")
+    print(f"{'='*60}\n")
+
+    # Add distribution to stats for JSON export
+    if input_sizes:
+        stats["crop_input_min_side_mean"] = round(avg_min, 1)
+        stats["crop_input_min_side_median"] = sorted_min[len(sorted_min) // 2]
+    if refined_crops:
+        stats["refined_count"] = n_refined
+        stats["refined_output_min_side_mean"] = round(avg_ref, 1)
+        stats["refined_output_min_side_median"] = sorted_ref[len(sorted_ref) // 2]
+        stats["scale_factor_distribution"] = dict(
+            sorted((str(k), v) for k, v in scale_counts.items())
+        )
 
 
 def run_pipeline(
@@ -354,6 +629,7 @@ def run_pipeline(
     skip_existing: bool = True,
     visualize: bool = True,
     crop_transitions: bool = True,
+    refine_crops: bool = True,
     device: str = "cuda",
 ):
     """Run the full texture transition extraction pipeline.
@@ -410,6 +686,12 @@ def run_pipeline(
     print("Loading Qwen model...")
     model = create_qwen_model(model_size="8B", device=device)
 
+    # Init SR refiner (lazy-loads on first crop)
+    refiner = None
+    if refine_crops and crop_transitions:
+        refiner = TextureRefinerPipeline(device=device)
+        print("SR refinement enabled (Real-ESRGAN x2plus, max 2x, max 512px)")
+
     # Process images
     all_metadata = list(existing_metadata)
     stats = {
@@ -433,7 +715,7 @@ def run_pipeline(
         entries = process_image(
             model, image_id, data_dir, exp_dir,
             sample_index=len(all_metadata), visualize=visualize,
-            crop_transitions=crop_transitions,
+            crop_transitions=crop_transitions, refiner=refiner,
         )
 
         if entries:
@@ -454,13 +736,46 @@ def run_pipeline(
     with open(metadata_path, "w") as f:
         json.dump(all_metadata, f, indent=2)
 
+    # Build crop-level metadata (one entry per crop, RWTD-compatible format)
+    crop_metadata = []
+    for entry in all_metadata:
+        for crop in entry.get("crops", []):
+            crop_entry = {
+                "image": crop["crop_image_path"],
+                "image_path": crop["crop_image_path"],
+                "mask_a_path": crop["crop_mask_a_path"],
+                "mask_b_path": crop["crop_mask_b_path"],
+                "texture_a": entry["texture_a"],
+                "texture_b": entry["texture_b"],
+                "description": entry["description"],
+                "vlm_assigned": entry.get("vlm_assigned", True),
+                "oracle_points": crop["oracle_points"],
+                "crop_name": f"{entry['crop_name']}_crop{crop['crop_index']}",
+                "coords": [0, 0, crop["crop_size"][1], crop["crop_size"][0]],
+                "source_image_id": entry.get("source_image_id", ""),
+                "source_transition": entry["crop_name"],
+                "source_box": crop["box"],
+                "crop_score": crop["score"],
+                "balance": crop["balance"],
+            }
+            # Add refined paths if SR was applied
+            if "refined_image_path" in crop:
+                crop_entry["refined_image_path"] = crop["refined_image_path"]
+                crop_entry["refined_mask_a_path"] = crop["refined_mask_a_path"]
+                crop_entry["refined_mask_b_path"] = crop["refined_mask_b_path"]
+                crop_entry["scale_factor"] = crop["scale_factor"]
+                crop_entry["refined_size"] = crop["refined_size"]
+            crop_metadata.append(crop_entry)
+
+    crops_meta_path = exp_dir / "crops" / "metadata.json"
+    crops_meta_path.parent.mkdir(parents=True, exist_ok=True)
+    with open(crops_meta_path, "w") as f:
+        json.dump(crop_metadata, f, indent=2)
+
     stats["total_transitions"] = len(all_metadata)
+    stats["total_crops"] = len(crop_metadata)
     stats["elapsed_seconds"] = round(elapsed, 1)
     stats["experiment"] = str(exp_dir)
-
-    stats_path = exp_dir / "stats.json"
-    with open(stats_path, "w") as f:
-        json.dump(stats, f, indent=2)
 
     # Save experiment config for reproducibility
     config = {
@@ -469,28 +784,21 @@ def run_pipeline(
         "max_images": max_images,
         "total_images_available": len(list((data_dir / "images").glob("*.jpg"))),
         "timestamp": datetime.now().isoformat(),
+        "min_crop_side": 64,
+        "refine_crops": refine_crops,
+        "max_scale": 2,
+        "max_output": 512,
     }
     with open(exp_dir / "config.json", "w") as f:
         json.dump(config, f, indent=2)
 
-    print(f"\n{'='*50}")
-    print(f"PIPELINE COMPLETE")
-    print(f"{'='*50}")
-    print(f"Experiment: {exp_dir}")
-    print(f"Images processed: {stats['processed']}")
-    print(f"Images skipped (existing): {stats['skipped_existing']}")
-    print(f"Images failed: {stats['failed']}")
-    print(f"Total transitions: {stats['total_transitions']}")
-    print(f"Time: {elapsed:.0f}s")
-    print(f"{'='*50}")
-    print(f"\nOutput structure:")
-    print(f"  {exp_dir}/metadata.json  <- training metadata (RWTD format)")
-    print(f"  {exp_dir}/images/               <- source images")
-    print(f"  {exp_dir}/masks/                <- colored annotation masks")
-    print(f"  {exp_dir}/masks_texture/         <- binary masks (mask_a, mask_b)")
-    print(f"  {exp_dir}/visualizations/        <- overlay visualizations")
-    print(f"  {exp_dir}/overlays/              <- original overlays from Detecture")
-    print(f"  {exp_dir}/crops/                 <- tight boundary crops (image + masks)")
+    # Compute detailed crop statistics
+    _print_pipeline_summary(stats, crop_metadata, all_metadata, exp_dir, elapsed)
+
+    # Save stats (including crop size distribution)
+    stats_path = exp_dir / "stats.json"
+    with open(stats_path, "w") as f:
+        json.dump(stats, f, indent=2)
 
 
 if __name__ == "__main__":
@@ -498,12 +806,13 @@ if __name__ == "__main__":
     parser.add_argument("--data-dir", default="/home/aviad/detecture_data")
     parser.add_argument("--output-dir", default="/datasets/ade20k/",
                         help="Base output dir (default: /home/aviad/detecture_experiments)")
-    parser.add_argument("--exp-name", default="testing_boundary",#"Detecture_dataset",
+    parser.add_argument("--exp-name", default="Detecture_dataset_x2",
                         help="Experiment name (default: exp_TIMESTAMP)")
-    parser.add_argument("--max-images", type=int, default=30)
+    parser.add_argument("--max-images", type=int, default=None)
     parser.add_argument("--no-skip", action="store_true", help="Don't skip existing results")
     parser.add_argument("--no-viz", action="store_true", help="Skip visualization generation")
     parser.add_argument("--no-crop", action="store_true", help="Skip boundary crop extraction")
+    parser.add_argument("--no-refine", action="store_true", help="Skip SR refinement of crops")
     parser.add_argument("--device", default="cuda")
     args = parser.parse_args()
 
@@ -515,5 +824,6 @@ if __name__ == "__main__":
         skip_existing=not args.no_skip,
         visualize=not args.no_viz,
         crop_transitions=not args.no_crop,
+        refine_crops=not args.no_refine,
         device=args.device,
     )

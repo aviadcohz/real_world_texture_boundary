@@ -20102,3 +20102,15 @@ synthetic_based_real_world/controlnet_training/checkpoints/controlnet_epoch_95/d
 synthetic_based_real_world/controlnet_training/checkpoints/eval_across_epochs/all_results.json
 synthetic_based_real_world/controlnet_training/checkpoints/eval_across_epochs/ods_ois_convergence.png
 synthetic_based_real_world/controlnet_training/checkpoints/eval_across_epochs/results_cache.json
+
+# Qwen2SAM - heavy files
+Qwen2SAM_rich_description/checkpoints/
+qwen2sam/checkpoints/
+checkpoints/
+logs/
+wandb/
+__pycache__/
+*.pyc
+*.pt
+*.pth
+*.safetensors
