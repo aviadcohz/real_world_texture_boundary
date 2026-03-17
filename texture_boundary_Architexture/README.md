@@ -25,31 +25,31 @@ Input                          Processing                         Output
                                +--------------------+
  Source Image  ───────────────>│  Qwen3-VL Analysis  │
  Segmentation Mask ───────────>│  (texture ID +      │
-                               │   color matching)    │
+                               │   color matching)   |
                                +--------+-----------+
                                         │
                                         v
                                +--------------------+
                                │  Mask Extraction    │
                                │  - Color quantize   │
-                               │  - Adjacency filter  │
-                               │  - Deduplication     │
+                               │  - Adjacency filter │
+                               │  - Deduplication    │
                                +--------+-----------+
                                         │
                                         v
                                +--------------------+             images/
                                │  Boundary Cropping  │────────>   masks_texture/
-                               │  - Skeleton anchors  │           visualizations/
-                               │  - Binary search     │           metadata.json
-                               │  - NMS               │
+                               │  - Skeleton anchors │            visualizations/
+                               │  - Binary search    │            metadata.json
+                               │  - NMS              │
                                +--------+-----------+
                                         │
                                         v
                                +--------------------+             crops/images/
                                │  Refinement (opt.)  │────────>   crops/masks_texture/
-                               │  - Color reassign    │           crops/visualizations/
-                               │  - Real-ESRGAN SR    │           crops/metadata.json
-                               │  - SDF smoothing     │
+                               │  - Color reassign   │            crops/visualizations/
+                               │  - Real-ESRGAN SR   │            crops/metadata.json
+                               │  - SDF smoothing    │
                                +--------------------+
 ```
 
