@@ -142,10 +142,21 @@ def process_image(
 
     Returns list of RWTD-format metadata dicts for valid transitions.
     """
-    src_image = data_dir / "images" / f"{image_id}.jpg"
-    src_mask = data_dir / "masks" / f"{image_id}.jpg"
+    # Find source files (try common extensions)
+    src_image = None
+    src_mask = None
+    for ext in ["jpg", "jpeg", "png", "bmp", "tiff"]:
+        candidate = data_dir / "images" / f"{image_id}.{ext}"
+        if candidate.exists():
+            src_image = candidate
+            break
+    for ext in ["jpg", "jpeg", "png", "bmp", "tiff"]:
+        candidate = data_dir / "masks" / f"{image_id}.{ext}"
+        if candidate.exists():
+            src_mask = candidate
+            break
 
-    if not src_image.exists() or not src_mask.exists():
+    if src_image is None or src_mask is None:
         print(f"  SKIP {image_id}: missing files")
         return []
 
@@ -264,8 +275,13 @@ def process_image(
             shutil.copy2(src_mask, dst_mask)
 
         # Copy overlay if available
-        src_overlay = data_dir / "overlays" / f"{image_id}.jpg"
-        if src_overlay.exists():
+        src_overlay = None
+        for ext in ["jpg", "jpeg", "png"]:
+            candidate = data_dir / "overlays" / f"{image_id}.{ext}"
+            if candidate.exists():
+                src_overlay = candidate
+                break
+        if src_overlay is not None:
             dst_overlay = overlays_dir / f"{crop_name}.jpg"
             if not dst_overlay.exists():
                 shutil.copy2(src_overlay, dst_overlay)
@@ -622,7 +638,7 @@ def _print_pipeline_summary(stats, crop_metadata, all_metadata, exp_dir, elapsed
 
 
 def run_pipeline(
-    data_dir: str = "/home/aviad/detecture_data",
+    data_dir: str,
     output_dir: str = None,
     exp_name: str = None,
     max_images: int = None,
@@ -631,23 +647,29 @@ def run_pipeline(
     crop_transitions: bool = True,
     refine_crops: bool = True,
     device: str = "cuda",
+    model_size: str = "8B",
+    image_ext: str = "jpg",
 ):
     """Run the full texture transition extraction pipeline.
 
     Args:
         data_dir: Directory with images/ and masks/ subdirectories.
         output_dir: Base output directory. Each experiment creates a subfolder.
+            Defaults to <data_dir>/experiments.
         exp_name: Experiment name. Defaults to timestamp.
         max_images: Process only first N images (for testing).
         skip_existing: Skip images that already have results.
         visualize: Generate overlay visualizations.
         crop_transitions: Extract tight boundary crops.
+        refine_crops: Apply Real-ESRGAN super-resolution to crops.
         device: CUDA device.
+        model_size: Qwen model size — "8B" or "2B".
+        image_ext: Image file extension in data_dir (default: "jpg").
     """
     data_dir = Path(data_dir)
 
     if output_dir is None:
-        output_dir = Path("/home/aviad/detecture_experiments")
+        output_dir = data_dir / "experiments"
     else:
         output_dir = Path(output_dir)
 
@@ -659,8 +681,20 @@ def run_pipeline(
 
     print(f"Experiment: {exp_dir}")
 
-    # Discover images
-    image_files = sorted((data_dir / "images").glob("*.jpg"))
+    # Discover images (support multiple extensions)
+    image_dir = data_dir / "images"
+    if not image_dir.exists():
+        raise FileNotFoundError(
+            f"No 'images/' directory found in {data_dir}. "
+            f"Expected structure:\n  {data_dir}/images/  (source images)\n  {data_dir}/masks/   (colored segmentation masks)"
+        )
+    image_files = sorted(image_dir.glob(f"*.{image_ext}"))
+    if not image_files:
+        # Try common extensions as fallback
+        for ext in ["jpg", "jpeg", "png", "bmp", "tiff"]:
+            image_files = sorted(image_dir.glob(f"*.{ext}"))
+            if image_files:
+                break
     image_ids = [f.stem for f in image_files]
 
     if max_images:
@@ -683,8 +717,8 @@ def run_pipeline(
     # Load model
     from texture_boundary_Architexture.models.qwen_vlm import create_qwen_model
 
-    print("Loading Qwen model...")
-    model = create_qwen_model(model_size="8B", device=device)
+    print(f"Loading Qwen-{model_size} model...")
+    model = create_qwen_model(model_size=model_size, device=device)
 
     # Init SR refiner (lazy-loads on first crop)
     refiner = None
@@ -782,7 +816,9 @@ def run_pipeline(
         "data_dir": str(data_dir),
         "exp_name": exp_name,
         "max_images": max_images,
-        "total_images_available": len(list((data_dir / "images").glob("*.jpg"))),
+        "total_images_available": len(image_ids),
+        "model_size": model_size,
+        "image_ext": image_ext,
         "timestamp": datetime.now().isoformat(),
         "min_crop_side": 64,
         "refine_crops": refine_crops,
@@ -803,10 +839,11 @@ def run_pipeline(
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Texture transition extraction pipeline")
-    parser.add_argument("--data-dir", default="/home/aviad/detecture_data")
-    parser.add_argument("--output-dir", default="/datasets/ade20k/",
-                        help="Base output dir (default: /home/aviad/detecture_experiments)")
-    parser.add_argument("--exp-name", default="Detecture_dataset_x2",
+    parser.add_argument("--data-dir", required=True,
+                        help="Directory with images/ and masks/ subdirectories")
+    parser.add_argument("--output-dir", default=None,
+                        help="Base output dir (default: <data-dir>/experiments)")
+    parser.add_argument("--exp-name", default=None,
                         help="Experiment name (default: exp_TIMESTAMP)")
     parser.add_argument("--max-images", type=int, default=None)
     parser.add_argument("--no-skip", action="store_true", help="Don't skip existing results")
@@ -814,6 +851,10 @@ if __name__ == "__main__":
     parser.add_argument("--no-crop", action="store_true", help="Skip boundary crop extraction")
     parser.add_argument("--no-refine", action="store_true", help="Skip SR refinement of crops")
     parser.add_argument("--device", default="cuda")
+    parser.add_argument("--model-size", default="8B", choices=["8B", "2B"],
+                        help="Qwen model size (default: 8B)")
+    parser.add_argument("--image-ext", default="jpg",
+                        help="Image file extension in data-dir (default: jpg)")
     args = parser.parse_args()
 
     run_pipeline(
@@ -826,4 +867,6 @@ if __name__ == "__main__":
         crop_transitions=not args.no_crop,
         refine_crops=not args.no_refine,
         device=args.device,
+        model_size=args.model_size,
+        image_ext=args.image_ext,
     )

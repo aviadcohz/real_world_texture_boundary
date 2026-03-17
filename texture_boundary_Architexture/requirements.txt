@@ -1,0 +1,15 @@
+# Core dependencies
+numpy>=1.24
+Pillow>=10.0
+opencv-python>=4.8
+scikit-image>=0.21
+
+# Vision-Language Model (Qwen3-VL)
+torch>=2.1
+transformers>=4.40
+qwen-vl-utils>=0.0.8
+accelerate>=0.30
+
+# Super-Resolution refinement (optional — install for --refine-crops)
+# realesrgan>=0.3.0
+# basicsr>=1.4.2

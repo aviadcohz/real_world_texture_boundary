@@ -1,0 +1,28 @@
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+dist/
+build/
+.eggs/
+*.so
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Environment
+.env
+*.log
+
+# Large files / data
+*.pt
+*.pth
+*.ckpt
+*.bin
+checkpoints/
+
+# Experiment outputs (too large for git)
+# Generate figures with: python -m texture_boundary_Architexture.scripts.generate_pipeline_figure
