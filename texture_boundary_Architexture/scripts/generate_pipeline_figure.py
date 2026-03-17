@@ -258,14 +258,33 @@ def generate_crop_figure(exp_dir: Path, output_dir: Path, max_examples: int = 3,
     return out_path
 
 
-def generate_results_grid(exp_dir: Path, output_dir: Path, max_samples: int = 8):
-    """Generate a grid of overlay visualization results."""
+def generate_results_grid(exp_dir: Path, output_dir: Path, max_samples: int = 8,
+                          grid_indices: list = None):
+    """Generate a grid of overlay visualization results.
+
+    Args:
+        grid_indices: Specific metadata indices to use for curated diversity.
+            If None, picks the first max_samples visualizations.
+    """
     viz_dir = exp_dir / "visualizations"
     if not viz_dir.exists():
         print("No visualizations directory — skipping results grid")
         return None
 
-    viz_files = sorted(viz_dir.glob("*.jpg"))[:max_samples]
+    if grid_indices:
+        # Map metadata indices to visualization filenames
+        with open(exp_dir / "metadata.json") as f:
+            metadata = json.load(f)
+        viz_files = []
+        for idx in grid_indices:
+            if idx < len(metadata):
+                crop_name = metadata[idx]["crop_name"]
+                vf = viz_dir / f"{crop_name}.jpg"
+                if vf.exists():
+                    viz_files.append(vf)
+    else:
+        viz_files = sorted(viz_dir.glob("*.jpg"))[:max_samples]
+
     if not viz_files:
         return None
 
@@ -303,6 +322,8 @@ def main():
     parser.add_argument("--crop-indices", type=int, nargs="+", default=None,
                         help="Specific metadata indices for crop examples (for curated diversity)")
     parser.add_argument("--max-grid-samples", type=int, default=8)
+    parser.add_argument("--grid-indices", type=int, nargs="+", default=None,
+                        help="Specific metadata indices for results grid (for curated diversity)")
     args = parser.parse_args()
 
     exp_dir = Path(args.exp_dir)
@@ -313,7 +334,7 @@ def main():
 
     generate_pipeline_figure(exp_dir, output_dir, args.sample_idx)
     generate_crop_figure(exp_dir, output_dir, args.max_crop_examples, args.crop_indices)
-    generate_results_grid(exp_dir, output_dir, args.max_grid_samples)
+    generate_results_grid(exp_dir, output_dir, args.max_grid_samples, args.grid_indices)
 
     print(f"\nDone! Figures saved to {output_dir}/")
 
