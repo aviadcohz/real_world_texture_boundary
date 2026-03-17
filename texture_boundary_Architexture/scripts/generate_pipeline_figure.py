@@ -156,22 +156,35 @@ def generate_pipeline_figure(exp_dir: Path, output_dir: Path, sample_idx: int = 
     return out_path
 
 
-def generate_crop_figure(exp_dir: Path, output_dir: Path, max_examples: int = 3):
+def generate_crop_figure(exp_dir: Path, output_dir: Path, max_examples: int = 3,
+                         sample_indices: list = None):
     """Generate crop extraction examples figure.
 
     Shows multiple rows, each: Full Image with crop box → Cropped region → Overlay
+
+    Args:
+        sample_indices: Specific metadata indices to use (for curated diversity).
+            If None, picks the first entries with crops.
     """
     with open(exp_dir / "metadata.json") as f:
         metadata = json.load(f)
 
     # Find entries with crops
     examples = []
-    for entry in metadata:
-        crops = entry.get("crops", [])
-        if crops:
-            examples.append((entry, crops[0]))  # Take best crop
-        if len(examples) >= max_examples:
-            break
+    if sample_indices:
+        for idx in sample_indices:
+            if idx < len(metadata):
+                entry = metadata[idx]
+                crops = entry.get("crops", [])
+                if crops:
+                    examples.append((entry, crops[0]))
+    else:
+        for entry in metadata:
+            crops = entry.get("crops", [])
+            if crops:
+                examples.append((entry, crops[0]))
+            if len(examples) >= max_examples:
+                break
 
     if not examples:
         print("No crops found — skipping crop figure")
@@ -287,6 +300,8 @@ def main():
     parser.add_argument("--output-dir", default="docs/figures", help="Output directory for figures")
     parser.add_argument("--sample-idx", type=int, default=0, help="Index of sample for pipeline overview")
     parser.add_argument("--max-crop-examples", type=int, default=3)
+    parser.add_argument("--crop-indices", type=int, nargs="+", default=None,
+                        help="Specific metadata indices for crop examples (for curated diversity)")
     parser.add_argument("--max-grid-samples", type=int, default=8)
     args = parser.parse_args()
 
@@ -297,7 +312,7 @@ def main():
     print(f"Output: {output_dir}\n")
 
     generate_pipeline_figure(exp_dir, output_dir, args.sample_idx)
-    generate_crop_figure(exp_dir, output_dir, args.max_crop_examples)
+    generate_crop_figure(exp_dir, output_dir, args.max_crop_examples, args.crop_indices)
     generate_results_grid(exp_dir, output_dir, args.max_grid_samples)
 
     print(f"\nDone! Figures saved to {output_dir}/")
